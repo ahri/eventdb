@@ -1,0 +1,7 @@
+resolver: lts-13.28
+
+packages:
+- .
+
+# Allow a newer minor version of GHC than the snapshot specifies
+compiler-check: newer-minor

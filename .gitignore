@@ -1,0 +1,8 @@
+.stack-work/
+*.cabal
+*~
+*.eventlog
+*.prof
+*.prof.html
+*.hp
+*.svg

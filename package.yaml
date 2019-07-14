@@ -1,0 +1,58 @@
+name:                eventdb
+version:             0.1.0.0
+github:              "ahri/eventdb"
+license:             BSD3
+author:              "Adam Piper"
+maintainer:          "adam@ahri.net"
+copyright:           "2019"
+
+extra-source-files:
+- README.md
+- ChangeLog.md
+
+# Metadata used when publishing your package
+# synopsis:            A simple database to store a stream of events (facts) and retrieve them by index
+# category:            prototype
+
+# To avoid duplicated efforts in documentation and dealing with the
+# complications of embedding Haddock markup inside cabal files, it is
+# common to point users to the README.md file.
+description:         Please see the README on GitHub at <https://github.com/ahri/eventdb#readme>
+
+dependencies:
+- base >= 4.7 && < 5
+- binary
+- bytestring
+- unix-bytestring
+- unix
+- directory
+- filepath
+
+library:
+  source-dirs: src
+
+executables:
+  eventdb-util:
+    main:                Main.hs
+    source-dirs:         app
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -Wall
+    - -Werror
+    dependencies:
+    - eventdb
+    - text
+    - async
+
+# tests:
+#   eventdb-test:
+#     main:                Spec.hs
+#     source-dirs:         test
+#     ghc-options:
+#     - -threaded
+#     - -rtsopts
+#     - -with-rtsopts=-N
+#     dependencies:
+#     - eventdb
