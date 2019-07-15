@@ -29,11 +29,17 @@ import System.Posix.IO
 import System.Posix.Types
 import System.FilePath.Posix
 
+magic :: B.ByteString
+magic = "ed01"
+
+magicSizeBytes :: Num a => a
+magicSizeBytes = fromIntegral $ B.length magic
+
 word64SizeBytes :: Num a => a
 word64SizeBytes = fromIntegral $ sizeOf (0 :: Word64)
 
 headerSizeBytes :: Num a => a
-headerSizeBytes = word64SizeBytes
+headerSizeBytes = magicSizeBytes + word64SizeBytes
 
 -- | Represent a database connection.
 data Connection = Connection
@@ -51,6 +57,7 @@ openConnection dir = do
     fdIdx <- openWriteSync pthIdx
     fdLog <- openWriteSync pthLog
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
+    when (idxSize == 0) $ writeAt fdIdx 0 magic
 
     Connection pthIdx pthLog <$> newMVar (fdIdx, fdLog)
   where
@@ -78,7 +85,7 @@ withConnection dir = bracket
 -- | Count of events currently stored in the database.
 eventCount :: Connection -> IO Word64
 eventCount conn = withRead conn $ \(fdIdx, _) -> do
-    pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx 0 word64SizeBytes
+    pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
     pure $ pIdxNext `div` word64SizeBytes
 
 -- | Write a series of events as a single atomic transaction.
@@ -86,10 +93,10 @@ writeEvents :: [B.ByteString] -> Connection -> IO Word64
 writeEvents bss conn = withWrite conn $ \(fdIdx, fdLog) -> do
     -- determine where in the log to write
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
-    (pIdxNext :: Word64, pLogNext :: Word64) <- if idxSize == 0
-        then pure (0, 0)
+    (pIdxNext :: Word64, pLogNext :: Word64) <- if idxSize == magicSizeBytes
+        then pure (magicSizeBytes, 0)
         else do
-            pIdxNext <- fmap decode $ readFrom fdIdx 0 word64SizeBytes
+            pIdxNext <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
             pLogNext <- fmap decode $ readFrom fdIdx pIdxNext word64SizeBytes
 
             pure (pIdxNext, pLogNext)
@@ -107,7 +114,7 @@ writeEvents bss conn = withWrite conn $ \(fdIdx, fdLog) -> do
     writeAt fdIdx pIdxNext' $ encode pLogNext'
 
     -- commit
-    writeAt fdIdx 0 $ encode pIdxNext'
+    writeAt fdIdx magicSizeBytes $ encode pIdxNext'
 
     pure eventId
 
@@ -115,16 +122,16 @@ writeEvents bss conn = withWrite conn $ \(fdIdx, fdLog) -> do
 readEventsFrom :: Word64 -> Connection -> IO [(Word64, B.ByteString)]
 readEventsFrom idx conn = withRead conn $ \(fdIdx, fdLog) -> do
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
-    if idxSize == 0
+    if idxSize == magicSizeBytes
         then pure []
         else do
-            pIdxNext :: Word64 <- fmap decode $ B.fdRead fdIdx word64SizeBytes
+            pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
             let lastIdx = (pIdxNext - headerSizeBytes) `div` word64SizeBytes
             (flip traverse) [idx..lastIdx] $ \i -> do
                 pLogStart <- if i == 0
                     then pure 0
-                    else fmap decode $ readFrom fdIdx (i * word64SizeBytes) word64SizeBytes
-                pLogUpTo  <- fmap decode $ readFrom fdIdx ((i+1) * word64SizeBytes) word64SizeBytes
+                    else fmap decode $ readFrom fdIdx (magicSizeBytes + (i * word64SizeBytes)) word64SizeBytes
+                pLogUpTo  <- fmap decode $ readFrom fdIdx (magicSizeBytes + ((i+1) * word64SizeBytes)) word64SizeBytes
                 fmap (i,) $ readFrom fdLog pLogStart (fromIntegral $ pLogUpTo - pLogStart)
 
 -- | Inspect a database, verifying its consistency and reporting on extraneous bytes leftover from failed writes, returning a simple notion of consistency.
@@ -132,7 +139,7 @@ inspect :: Connection -> IO Bool
 inspect conn = withWrite conn $ \(fdIdx, fdLog) -> do
     -- TODO: should catch exceptions here really
 
-    pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx 0 word64SizeBytes
+    pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
     let expectedCount = pIdxNext `div` word64SizeBytes
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
     logSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdLog

@@ -18,7 +18,7 @@ main :: IO ()
 main = do
     args <- getArgs
     when (length args < 2) $ do
-        hPutStr stderr "Usage: dir_name [commands...]\n where commands are: spam, thrash, inspect"
+        hPutStr stderr "Usage: dir_name [commands...]\n where commands are: spam, thrash, single, inspect\n"
         exitFailure
 
     let (dir:optionalArgs) = args
@@ -53,6 +53,8 @@ main = do
         "inspect" -> withConnection dir $ \conn -> do
             isConsistent <- inspect conn
             when (not isConsistent) exitFailure
+
+        "single" -> withConnection dir $ spam "foo"
 
         unknown -> do
             hPutStr stderr $ "Unknown arg: " <> unknown

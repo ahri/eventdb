@@ -54,6 +54,5 @@ write errors, allowing tests on consistency - see
 on a laptop with a consumer-grade SSD.
 
 ## TODO
-- Binary "magic" at start of index
 - Isolation
 - .cabal file with tested lower bounds
