@@ -1,8 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
 
+import Data.Word
 import Control.Concurrent.Async
 import Control.Monad
 import qualified Data.ByteString.Lazy as B
@@ -34,12 +36,32 @@ main = do
             _ <- (fmap.fmap.fmap) (T.decodeUtf8 . B.toStrict) $ readEventsFrom 0 conn
             pure ()
 
+        listX :: Word64 -> Connection -> IO ()
+        listX count conn = do
+            actualCount <- eventCount conn
+            let c = if actualCount < count
+                then 0
+                else actualCount - count
+            _ <- (fmap.fmap.fmap) (T.decodeUtf8 . B.toStrict) $ readEventsFrom c conn
+            pure ()
+
     _ <- (flip traverse) optionalArgs $ \case
         "thrash" -> forM_ [1..10::Int] $ \_ -> withConnection dir $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ spam "foo"
-                , listAll
+                , listX 3
+                , spam "bar"
+                , listX 3
+                , spam "baz"
+                , listX 3
+                ] >> pure ()
+
+        -- takes 47.08s to read 3000 events 1000 times, so 300,000 events
+        "listall" -> forM_ [1..10::Int] $ \_ -> withConnection dir $ \conn ->
+            mapConcurrently
+                (\f -> forM_ [1..100::Int] $ \_ -> f conn)
+                [ listAll
                 ] >> pure ()
 
         "spam" -> withConnection dir $ \conn ->
