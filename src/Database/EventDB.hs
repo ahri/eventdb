@@ -85,8 +85,12 @@ withConnection dir = bracket
 -- | Count of events currently stored in the database.
 eventCount :: Connection -> IO Word64
 eventCount conn = withRead conn $ \(fdIdx, _) -> do
-    pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
-    pure $ pIdxNext `div` word64SizeBytes
+    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
+    if idxSize == magicSizeBytes
+        then pure 0
+        else do
+            pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
+            pure $ pIdxNext `div` word64SizeBytes
 
 -- | Write a series of events as a single atomic transaction.
 writeEvents :: [B.ByteString] -> Connection -> IO Word64
