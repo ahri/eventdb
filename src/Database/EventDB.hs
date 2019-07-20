@@ -45,8 +45,12 @@ headerSizeBytes = magicSizeBytes + word64SizeBytes
 data Connection = Connection
     { pathIdx :: FilePath
     , pathLog :: FilePath
-    , lock    :: MVar (Fd, Fd) -- TODO: newtypes over Idx, Log
+    , lock    :: MVar (IdxFile, LogFile)
     }
+
+type File = (FilePath, Fd)
+newtype IdxFile = IdxFile { unIdxFile :: File } deriving (Eq, Show)
+newtype LogFile = LogFile { unLogFile :: File } deriving (Eq, Show)
 
 -- | Open a database connection.
 openConnection
@@ -57,9 +61,11 @@ openConnection dir = do
     fdIdx <- openWriteSync pthIdx
     fdLog <- openWriteSync pthLog
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
-    when (idxSize == 0) $ writeAt fdIdx 0 magic
+    let fIdx = (pthIdx, fdIdx)
+        fLog = (pthLog, fdLog)
+    when (idxSize == 0) $ writeAt fIdx 0 magic
 
-    Connection pthIdx pthLog <$> newMVar (fdIdx, fdLog)
+    Connection pthIdx pthLog <$> newMVar (IdxFile fIdx, LogFile fLog)
   where
     pthIdx = joinPath [dir, "idx"]
     pthLog = joinPath [dir, "log"]
@@ -72,9 +78,9 @@ openConnection dir = do
 -- | Close a database connection.
 closeConnection :: Connection -> IO ()
 closeConnection conn = do
-    (fdIdx, fdLog) <- takeMVar $ lock conn
-    closeFd fdLog
-    closeFd fdIdx
+    (fIdx, fLog) <- takeMVar $ lock conn
+    closeFd $ snd . unLogFile $ fLog
+    closeFd $ snd . unIdxFile $ fIdx
 
 -- | Convenience function accepting a continuation for the connection. Opens and closes the connection for you.
 withConnection :: FilePath -> (Connection -> IO a) -> IO a
@@ -84,30 +90,35 @@ withConnection dir = bracket
 
 -- | Count of events currently stored in the database.
 eventCount :: Connection -> IO Word64
-eventCount conn = withRead conn $ \(fdIdx, _) -> do
-    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
+eventCount conn = withRead conn $ \(fIdx, _) -> do
+    let file = unIdxFile fIdx
+    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd file
     if idxSize == magicSizeBytes
         then pure 0
         else do
-            pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
+            pIdxNext :: Word64 <- fmap decode $ readFrom file magicSizeBytes word64SizeBytes
             pure $ pIdxNext `div` word64SizeBytes
 
 -- | Write a series of events as a single atomic transaction.
 writeEvents :: [B.ByteString] -> Connection -> IO Word64
-writeEvents bss conn = withWrite conn $ \(fdIdx, fdLog) -> do
+writeEvents bss conn = withWrite conn $ \(fIdx, fLog) -> do
     -- determine where in the log to write
-    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
-    (pIdxNext :: Word64, pLogNext :: Word64) <- if idxSize == magicSizeBytes
+    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus (snd $ unIdxFile fIdx)
+    let emptyDb = idxSize == magicSizeBytes
+    (pIdxNext :: Word64, pLogNext :: Word64) <- if emptyDb
         then pure (magicSizeBytes, 0)
         else do
-            pIdxNext <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
-            pLogNext <- fmap decode $ readFrom fdIdx pIdxNext word64SizeBytes
-
-            pure (pIdxNext, pLogNext)
+            pIdxNext <- fmap decode $ readFrom (unIdxFile fIdx) magicSizeBytes word64SizeBytes
+            let missingCommit = pIdxNext == 0
+            if missingCommit
+                then pure (magicSizeBytes, 0)
+                else do
+                    pLogNext <- fmap decode $ readFrom (unIdxFile fIdx) pIdxNext word64SizeBytes
+                    pure (pIdxNext, pLogNext)
 
     -- write the event data
     -- TODO: write timestamp?
-    _ <- (flip traverse) bss $ writeAt fdLog pLogNext
+    _ <- (flip traverse) bss $ writeAt (unLogFile fLog) pLogNext
 
     -- calculate new offsets
     let pIdxNext' = pIdxNext + word64SizeBytes
@@ -115,41 +126,56 @@ writeEvents bss conn = withWrite conn $ \(fdIdx, fdLog) -> do
         eventId   = (pIdxNext' - headerSizeBytes) `div` word64SizeBytes
 
     -- write index ptr for next time
-    writeAt fdIdx pIdxNext' $ encode pLogNext'
+    writeAt (unIdxFile fIdx) pIdxNext' $ encode pLogNext'
 
-    -- commit
-    writeAt fdIdx magicSizeBytes $ encode pIdxNext'
+    -- commit (this is a great line to leave out for testing!)
+    writeAt (unIdxFile fIdx) magicSizeBytes $ encode pIdxNext'
 
     pure eventId
 
 -- | Read all events from the specified index.
 readEventsFrom :: Word64 -> Connection -> IO [(Word64, B.ByteString)]
-readEventsFrom idx conn = withRead conn $ \(fdIdx, fdLog) -> do
-    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
+readEventsFrom idx conn = withRead conn $ \(fIdx, fLog) -> do
+    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unIdxFile fIdx
     if idxSize == magicSizeBytes
         then pure []
         else do
-            pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
-            let lastIdx = (pIdxNext - headerSizeBytes) `div` word64SizeBytes
-            (flip traverse) [idx..lastIdx] $ \i -> do
-                pLogStart <- if i == 0
-                    then pure 0
-                    else fmap decode $ readFrom fdIdx (magicSizeBytes + (i * word64SizeBytes)) word64SizeBytes
-                pLogUpTo  <- fmap decode $ readFrom fdIdx (magicSizeBytes + ((i+1) * word64SizeBytes)) word64SizeBytes
-                fmap (i,) $ readFrom fdLog pLogStart (fromIntegral $ pLogUpTo - pLogStart)
+            pIdxNext :: Word64 <- fmap decode $ readFrom (unIdxFile fIdx) magicSizeBytes word64SizeBytes
+            let missingCommit = pIdxNext == 0
+            if missingCommit
+                then pure []
+                else do
+                    let lastIdx = (pIdxNext `natSubt` headerSizeBytes) `div` word64SizeBytes
+                    (flip traverse) [idx..lastIdx] $ \i -> do
+                        pLogStart <- if i == 0
+                            then pure 0
+                            else fmap decode $ readFrom (unIdxFile fIdx) (magicSizeBytes + (i * word64SizeBytes)) word64SizeBytes
+                        pLogUpTo  <- fmap decode $ readFrom (unIdxFile fIdx) (magicSizeBytes + ((i+1) * word64SizeBytes)) word64SizeBytes
+                        fmap (i,) $ readFrom (unLogFile fLog) pLogStart (fromIntegral $ pLogUpTo `natSubt` pLogStart)
 
 -- | Inspect a database, verifying its consistency and reporting on extraneous bytes leftover from failed writes, returning a simple notion of consistency.
 inspect :: Connection -> IO Bool
-inspect conn = withWrite conn $ \(fdIdx, fdLog) -> do
+inspect conn = withWrite conn $ \(fIdx, fLog) -> do
     -- TODO: should catch exceptions here really
 
-    pIdxNext :: Word64 <- fmap decode $ readFrom fdIdx magicSizeBytes word64SizeBytes
-    let expectedCount = pIdxNext `div` word64SizeBytes
-    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
-    logSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdLog
-    let idxCount = (idxSize - headerSizeBytes) `div` word64SizeBytes
-    putStrLn $ "Index file size: " <> show idxSize
-    putStrLn $ "Log file size: " <> show logSize
+    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unIdxFile fIdx
+    logSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unLogFile fLog
+
+    let emptyDb = idxSize == magicSizeBytes
+
+    pIdxNext :: Word64 <- if idxSize == magicSizeBytes
+        then pure magicSizeBytes
+        else fmap decode $ readFrom (unIdxFile fIdx) magicSizeBytes word64SizeBytes
+
+    let missingCommit = pIdxNext == 0
+        pIdxNext' = if missingCommit 
+            then magicSizeBytes
+            else pIdxNext
+
+    let expectedCount = (pIdxNext' `natSubt` magicSizeBytes) `div` word64SizeBytes
+    let idxCount = if emptyDb then 0 else (idxSize `natSubt` headerSizeBytes) `div` word64SizeBytes
+    putStrLn $ "Index file size (bytes): " <> show idxSize
+    putStrLn $ "Log file size (bytes): " <> show logSize
     putStrLn ""
     putStrLn $ "Expected count: " <> show expectedCount
     putStrLn $ "Index count: " <> show idxCount
@@ -157,10 +183,14 @@ inspect conn = withWrite conn $ \(fdIdx, fdLog) -> do
     len <- fmap length $ readEventsFrom 0 conn
     putStrLn $ "Actual read data count: " <> show len
     -- if not equal then invalid
-    pLogNext :: Word64 <- fmap decode $ readFrom fdIdx pIdxNext word64SizeBytes
+    pLogNext :: Word64 <- if emptyDb
+        then pure 0
+        else fmap decode $ readFrom (unIdxFile fIdx) pIdxNext' word64SizeBytes
 
-    let idxExcessBytes = idxSize - (pIdxNext + word64SizeBytes)
-        logExcessBytes = logSize - pLogNext
+    let idxExcessBytes = if emptyDb
+            then 0
+            else idxSize `natSubt` (pIdxNext' + headerSizeBytes)
+        logExcessBytes = logSize `natSubt` pLogNext
 
     putStrLn ""
 
@@ -181,30 +211,44 @@ inspect conn = withWrite conn $ \(fdIdx, fdLog) -> do
     pure consistent
 
 -- Unsafe - don't leak this outside the module, or use the ST trick
-withRead :: Connection -> ((Fd, Fd) -> IO a) -> IO a
+withRead :: Connection -> ((IdxFile, LogFile) -> IO a) -> IO a
 withRead conn = bracket
         ((,)
-            <$> openFd (pathIdx conn) ReadOnly Nothing defaultFileFlags
-            <*> openFd (pathLog conn) ReadOnly Nothing defaultFileFlags
+            <$> (do
+                    fdIdx <- openFd (pathIdx conn) ReadOnly Nothing defaultFileFlags
+                    pure $ IdxFile (pathIdx conn, fdIdx)
+                )
+            <*> (do
+                    fdLog <- openFd (pathLog conn) ReadOnly Nothing defaultFileFlags
+                    pure $ LogFile (pathLog conn, fdLog)
+                )
         )
-        (\(fdIdx, fdLog) -> do
-            closeFd fdLog
-            closeFd fdIdx
+        (\(fIdx, fLog) -> do
+            closeFd $ snd $ unLogFile fLog
+            closeFd $ snd $ unIdxFile fIdx
         )
 
 -- Unsafe - don't leak this outside the module, or use the ST trick
-withWrite :: Connection -> ((Fd, Fd) -> IO a) -> IO a
+withWrite :: Connection -> ((IdxFile, LogFile) -> IO a) -> IO a
 withWrite conn = let writeLock = lock conn in bracket
     (takeMVar writeLock)
     (putMVar writeLock)
 
-writeAt :: Fd -> Word64 -> B.ByteString -> IO ()
-writeAt fd addr bs = do
+writeAt :: File -> Word64 -> B.ByteString -> IO ()
+writeAt file addr bs = do
+    let (_name, fd) = file
+    -- putStrLn $ "Writing " <> _name <> ": @" <> show addr <> ", " <> show (B.length bs) <> " bytes"
     _ <- fdSeek fd AbsoluteSeek $ fromIntegral addr
     _ <- B.fdWritev fd bs
     pure ()
 
-readFrom :: Fd -> Word64 -> CSize -> IO B.ByteString
-readFrom fd addr count = do
-    _ <- fdSeek fd AbsoluteSeek $ fromIntegral addr
-    B.fdRead fd count
+readFrom :: File -> Word64 -> CSize -> IO B.ByteString
+readFrom file addr count = do
+    let (_name, fd) = file
+    -- putStrLn $ "Reading " <> _name <> ": @" <> show addr <> ", " <> show count <> " bytes"
+    B.fdPread fd count (fromIntegral addr)
+
+natSubt :: Word64 -> Word64 -> Word64
+natSubt x y = if y > x
+    then 0
+    else x - y

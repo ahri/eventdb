@@ -28,4 +28,7 @@ for i in `seq 1 $rounds`; do
 
 	stack exec -- eventdb-util "$dir" inspect
 	let 'i++'
+	echo
 done
+
+echo "All runs passed!"
