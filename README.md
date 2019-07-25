@@ -13,7 +13,7 @@ locked to operate sequentially.
 Only POSIX (i.e. non-Windows) platforms are supported.
 
 
-## [AC_D](https://en.wikipedia.org/wiki/ACID)
+## [ACiD](https://en.wikipedia.org/wiki/ACID)
 A database is expected to make guarantees about the data it holds, which are
 collectively known as "ACID". Note in particular that all guarantees hold only
 on systems/filesystems that honour the contract of
@@ -28,6 +28,11 @@ after each write, forcing data through the userspace and kernel to ensure it's
 flushed to the physical disk drive. Failures of a physical device to atomically
 write its buffers are not accounted for.
 
+The lowercase `i` above is to highlight that the responsibility of "isolation"
+is handed over to client code - probably using
+[STM](https://hackage.haskell.org/package/stm), rather than being supported
+directly in the database.
+
 ### Atomicity
 Grouped writes (i.e. transactions) to the database are guaranteed to be atomic,
 i.e. they will either all be written, or none of them will be.
@@ -38,9 +43,15 @@ write. This is trivial to achieve with such a simple database where there is no
 support for multiple tables and the relationships between them.
 
 ### Isolation
-Support for isolation will come with
-[STM](https://hackage.haskell.org/package/stm), as such there is no isolation
-right now.
+Client code run in [STM](https://hackage.haskell.org/package/stm) gets the
+benefits of isolation through maintaining its own state and invalidating
+transactions at a more fine-grained level than can be achieved at the database
+level. Put another way; the database could invalidate any transactions if a
+change has taken place in the meantime - but this is like using a sledgehammer
+to crack a nut. On the other hand, client code knows in great detail whether or
+not a transaction is valid, so passing off the isolation responsibility allows
+for more efficient operation. See [demo](app-bank-acct-demo/Main.hs) as an
+example - examine in particular the `transact` function.
 
 ### Durability
 Successful writes to the database are guaranteed to persist even in the case of
@@ -48,11 +59,12 @@ system failures like a crash or power outage. Uncommitted/interrupted writes
 will not affect the state of the database once the system is operational.
 
 ## Testing
-The excellent [libfiu](https://blitiri.com.ar/p/libfiu/) was used to introduce
+The excellent [libfiu](https://blitiri.com.ar/p/libfiu/) is used to introduce
 write errors, allowing tests on consistency - see
 [script](test/eventdb-acd-test.sh). In addition power-pull tests were executed
 on a laptop with a consumer-grade SSD.
 
 ## TODO
-- Isolation
+- A concise sanity check script to avoid bugs being committed
 - .cabal file with tested lower bounds
+- Haddocks
