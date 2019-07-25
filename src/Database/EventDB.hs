@@ -240,7 +240,9 @@ withWrite conn = let writeLock = lock conn in bracket
 writeAt :: File -> Word64 -> B.ByteString -> IO ()
 writeAt file addr bs = do
     let (_name, fd) = file
-    -- putStrLn $ "Writing " <> _name <> ": @" <> show addr <> ", " <> show (B.length bs) <> " bytes"
+#ifdef DEBUG
+    putStrLn $ "Writing " <> _name <> ": @" <> show addr <> ", " <> show (B.length bs) <> " bytes"
+#endif
     _ <- fdSeek fd AbsoluteSeek $ fromIntegral addr
     _ <- B.fdWritev fd bs
     pure ()
@@ -248,7 +250,9 @@ writeAt file addr bs = do
 readFrom :: File -> Word64 -> CSize -> IO B.ByteString
 readFrom file addr count = do
     let (_name, fd) = file
-    -- putStrLn $ "Reading " <> _name <> ": @" <> show addr <> ", " <> show count <> " bytes"
+#ifdef DEBUG
+    putStrLn $ "Reading " <> _name <> ": @" <> show addr <> ", " <> show count <> " bytes"
+#endif
     B.fdPread fd count (fromIntegral addr)
 
 natSubt :: Word64 -> Word64 -> Word64
