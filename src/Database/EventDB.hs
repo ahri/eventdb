@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE CPP #-}
 
 module Database.EventDB
     ( Connection -- don't leak constructor
@@ -128,8 +129,10 @@ writeEvents bss conn = withWrite conn $ \(fIdx, fLog) -> do
     -- write index ptr for next time
     writeAt (unIdxFile fIdx) pIdxNext' $ encode pLogNext'
 
-    -- commit (this is a great line to leave out for testing!)
+    -- commit
+#ifndef BREAKDB_OMIT_COMMIT
     writeAt (unIdxFile fIdx) magicSizeBytes $ encode pIdxNext'
+#endif
 
     pure eventId
 
