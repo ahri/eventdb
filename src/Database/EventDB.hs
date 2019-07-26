@@ -117,24 +117,27 @@ writeEvents bss conn = withWrite conn $ \(fIdx, fLog) -> do
                     pLogNext <- fmap decode $ readFrom (unIdxFile fIdx) pIdxNext word64SizeBytes
                     pure (pIdxNext, pLogNext)
 
-    -- write the event data
-    -- TODO: write timestamp?
-    _ <- (flip traverse) bss $ writeAt (unLogFile fLog) pLogNext
+    case bss of
+        [] -> pure $ (pIdxNext `natSubt` headerSizeBytes) `div` word64SizeBytes
+        _  -> do
+            -- write the event data
+            -- TODO: write timestamp?
+            _ <- (flip traverse) bss $ writeAt (unLogFile fLog) pLogNext
 
-    -- calculate new offsets
-    let pIdxNext' = pIdxNext + word64SizeBytes
-        pLogNext' = pLogNext + (getSum $ foldMap (Sum . fromIntegral . B.length) bss)
-        eventId   = (pIdxNext' - headerSizeBytes) `div` word64SizeBytes
+            -- calculate new offsets
+            let pIdxNext' = pIdxNext + word64SizeBytes
+                pLogNext' = pLogNext + (getSum $ foldMap (Sum . fromIntegral . B.length) bss)
+                eventId   = (pIdxNext' - headerSizeBytes) `div` word64SizeBytes
 
-    -- write index ptr for next time
-    writeAt (unIdxFile fIdx) pIdxNext' $ encode pLogNext'
+            -- write index ptr for next time
+            writeAt (unIdxFile fIdx) pIdxNext' $ encode pLogNext'
 
-    -- commit
+            -- commit
 #ifndef BREAKDB_OMIT_COMMIT
-    writeAt (unIdxFile fIdx) magicSizeBytes $ encode pIdxNext'
+            writeAt (unIdxFile fIdx) magicSizeBytes $ encode pIdxNext'
 #endif
 
-    pure eventId
+            pure eventId
 
 -- | Read all events from the specified index.
 readEventsFrom :: Word64 -> Connection -> IO [(Word64, B.ByteString)]
