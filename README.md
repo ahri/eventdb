@@ -59,12 +59,14 @@ system failures like a crash or power outage. Uncommitted/interrupted writes
 will not affect the state of the database once the system is operational.
 
 ## Testing
+A [sanity](test/sanity.sh) test script is run as a pre-commit hook to ensure
+that the database maintains consistency.
+
 The excellent [libfiu](https://blitiri.com.ar/p/libfiu/) is used to introduce
 write errors, allowing tests on consistency - see
 [script](test/eventdb-acd-test.sh). In addition power-pull tests were executed
 on a laptop with a consumer-grade SSD.
 
 ## TODO
-- A concise sanity check script to avoid bugs being committed
 - .cabal file with tested lower bounds
 - Haddocks

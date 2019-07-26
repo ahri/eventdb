@@ -181,7 +181,7 @@ inspect conn = withWrite conn $ \(fIdx, fLog) -> do
     putStrLn $ "Log file size (bytes): " <> show logSize
     putStrLn ""
     putStrLn $ "Expected count: " <> show expectedCount
-    putStrLn $ "Index count: " <> show idxCount
+    putStrLn $ "Count guess based on filesize: " <> show idxCount
 
     len <- fmap length $ readEventsFrom 0 conn
     putStrLn $ "Actual read data count: " <> show len
