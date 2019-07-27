@@ -132,9 +132,11 @@ exec state cmd = case cmd of
 apply :: State TVar -> [Event] -> STM ()
 apply state evs = (flip traverse_) evs $ \case
     Renamed x   -> writeTVar (holder state) $ AcctHolder x
+
     Deposited x -> do
         (Balance bal) <- readTVar $ balance state
         writeTVar (balance state) $ Balance $ bal + x
+
     Withdrew  x -> do
         (Balance bal) <- readTVar $ balance state
         writeTVar (balance state) $ Balance $ bal - x
