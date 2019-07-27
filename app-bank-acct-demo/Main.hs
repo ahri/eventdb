@@ -1,3 +1,5 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Main where
@@ -13,66 +15,74 @@ import System.Directory
 import System.Exit
 import System.Random
 
-data State = State
-    { balance :: Integer
-    } deriving (Show, Eq)
+newtype AcctHolder = AcctHolder String
+newtype Balance = Balance Integer
+
+data State f = State
+    { holder  :: f AcctHolder
+    , balance :: f Balance
+    }
 
 data Command
-    = Deposit Integer
+    = Rename String
+    | Deposit Integer
     | Withdraw Integer
 
 data Event
-    = Deposited Integer
+    = Renamed String
+    | Deposited Integer
     | Withdrew Integer
     deriving (Show, Read)
 
 main :: IO ()
 main = do
-    let initialState = State 0
-        dir = "/tmp/eventdb-bank-acct-demo"
+    let dir = "/tmp/eventdb-bank-acct-demo"
+    state1 <- initialState
+    s1init <- showState state1
 
-    putStrLn $ "Initialising " <> show initialState <> " and creating DB in " <> show dir
+    putStrLn $ "Initialising " <> s1init <> " and creating DB in " <> show dir
     removePathForcibly dir
     conn <- openConnection dir
-    state <- newTVarIO initialState
 
     putStrLn "Executing random commands concurrently..."
-    replicateConcurrently_ 10 $ do
-        cmd <- randomCommand
-        evs <- atomically $ transact state cmd
-        case evs of
-            [] -> pure ()
-            _  -> writeEvents (fmap (C.pack . show) evs) conn >> pure ()
+    mapConcurrently_
+        (>>= transact conn state1)
+        $ (replicate 10 $ randomCommand) <> [pure $ Rename "Jemima Schmidt"]
 
-    s <- readTVarIO state
-    putStrLn $ "Resulting state: " <> show s
-    when (balance s < 0) $ do
+    -- store a representation of the original state
+    s1 <- showState state1
+
+    (Balance b) <- readTVarIO $ balance state1
+    putStrLn $ "Resulting state: " <> s1
+    when (b < 0) $ do
         putStrLn "ERROR: Balance should never be below zero"
         exitFailure
 
-    putStrLn ""
-
-    putStrLn $ "Replaying events against " <> show initialState
-    s' <- readEventsFrom 0 conn >>= foldM
-        (\s' (_idx, ev) -> do
+    state2 <- initialState
+    s2init <- showState state2
+    putStrLn $ "\nReplaying events against " <> s2init
+    readEventsFrom 0 conn >>= traverse_
+        (\(_idx, ev) -> do
             let ev' :: Event = read . C.unpack $ ev
             print ev'
-            pure $ apply [ev'] s'
+            atomically $ apply state2 [ev']
         )
-        initialState
 
-    putStrLn ""
+    -- store a representation of the replayed state
+    s2 <- showState state2
 
-    putStrLn "Comparing states..."
-    let cmp = s == s'
+    putStrLn "\nComparing states..."
+    let cmp = s1 == s2
 
-    putStrLn $ show s <> " == " <> show s' <> " ~ " <> show cmp
+    putStrLn $ s1 <> " == " <> s2 <> " ~ " <> show cmp
 
     when (not cmp) $ do
         putStrLn "ERROR: States should always be equal"
         exitFailure
 
   where
+    initialState = State <$> newTVarIO (AcctHolder "John Smith") <*> newTVarIO (Balance 0)
+
     randomCommand :: IO Command
     randomCommand = do
         cmd::Float <- randomIO
@@ -84,32 +94,47 @@ main = do
             then Deposit valMinus10ToPlus10
             else Withdraw valMinus10ToPlus10
 
--- The STM monad allows us to express a custom transaction
-transact :: TVar State -> Command -> STM [Event]
-transact state cmd = do
-    s <- readTVar state
-    case exec cmd s of
-        Left _    -> pure [] -- NB. through client validation we get fine-grained isolation
-        Right evs -> do
-            writeTVar state $ apply evs s
-            pure $ evs
+    showState :: State TVar -> IO String
+    showState state = do
+        (AcctHolder h) <- readTVarIO $ holder state
+        (Balance b)    <- readTVarIO $ balance state
+        pure $ "State '" <> h <> "' " <> show b
+
+transact :: Connection -> State TVar -> Command -> IO ()
+transact conn state cmd = do
+    evs <- atomically $ do
+        result <- exec state cmd
+        case result of
+            Left _    -> pure [] -- in this case we're just ignoring errors
+            Right evs -> do
+                apply state evs
+                pure $ evs
+
+    writeEvents (fmap (C.pack . show) evs) conn >> pure ()
 
 -- NB. all error checking happens here - isolation is in the control of client code
-exec :: Command -> State -> Either String [Event]
-exec cmd (State bal) = case cmd of
-    Deposit x
-        | x < 0     -> Left "Negative deposits are not allowed"
-        | otherwise -> Right [Deposited x]
+exec :: State TVar -> Command -> STM (Either String [Event])
+exec state cmd = case cmd of
+    Rename x        -> pure $ Right [Renamed x]
 
-    Withdraw x
-        | x > bal   -> Left "Insufficient balance"
-        | x < 0     -> Left "Negative withdrawls are not allowed"
-        | otherwise -> Right [Withdrew x]
+    Deposit x
+        | x <= 0    -> pure $ Left "Deposits of less than 1 are not allowed"
+        | otherwise -> pure $ Right [Deposited x]
+
+    Withdraw x -> do
+        (Balance bal) <- readTVar $ balance state -- here we express a fine-grained dependency
+        pure $ if | x > bal   -> Left "Insufficient balance"
+                  | x <= 0    -> Left "Withdrawls of less than 1 are not allowed"
+                  | otherwise -> Right [Withdrew x]
 
 -- NB. there is no error checking here; events are facts and must be applied
-apply :: [Event] -> State -> State
-apply evs state = foldl' f state evs
-  where
-    f (State bal) ev = case ev of
-        Deposited x -> State $ bal + x
-        Withdrew  x -> State $ bal - x
+-- we can express fine-grained dependencies on only the data we need to change
+apply :: State TVar -> [Event] -> STM ()
+apply state evs = (flip traverse_) evs $ \case
+    Renamed x   -> writeTVar (holder state) $ AcctHolder x
+    Deposited x -> do
+        (Balance bal) <- readTVar $ balance state
+        writeTVar (balance state) $ Balance $ bal + x
+    Withdrew  x -> do
+        (Balance bal) <- readTVar $ balance state
+        writeTVar (balance state) $ Balance $ bal - x

@@ -1,7 +1,7 @@
 # EventDB
 
 A simple database to store a stream of events (facts) and retrieve them by
-index. This is aimed at systems based off
+index. This is aimed at systems based on
 [Event Sourcing](https://martinfowler.com/eaaDev/EventSourcing.html) where
 complex state modelling/querying is left to other subsystems (e.g. your app, or
 a relational/graph database).
@@ -51,7 +51,7 @@ change has taken place in the meantime - but this is like using a sledgehammer
 to crack a nut. On the other hand, client code knows in great detail whether or
 not a transaction is valid, so passing off the isolation responsibility allows
 for more efficient operation. See [demo](app-bank-acct-demo/Main.hs) as an
-example - examine in particular the `transact` function.
+example - examine in particular the `transact`, `exec` and `apply` functions.
 
 ### Durability
 Successful writes to the database are guaranteed to persist even in the case of
