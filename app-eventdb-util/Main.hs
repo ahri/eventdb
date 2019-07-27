@@ -26,6 +26,9 @@ main = do
     let (dir:optionalArgs) = args
 
     let
+        empty :: Connection -> IO ()
+        empty conn = writeEvents [] conn >> pure ()
+
         spam :: T.Text -> Connection -> IO ()
         spam msg conn = do
             _ <- writeEvents [B.fromStrict $ T.encodeUtf8 msg] conn
@@ -75,6 +78,8 @@ main = do
         "inspect" -> withConnection dir $ \conn -> do
             isConsistent <- inspect conn
             when (not isConsistent) exitFailure
+
+        "empty" -> withConnection dir empty
 
         "single" -> withConnection dir $ spam "foo"
 

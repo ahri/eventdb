@@ -10,6 +10,11 @@ runtest()
 	runs=$1
 	expected=$2
 
+	if [ $runs = "e" ]; then
+		stack exec -- eventdb-util "$dir" empty
+		runs=0
+	fi
+
 	rm -rf "$dir"
 	i=0
 	while [ $i -lt $runs ]; do
@@ -25,11 +30,13 @@ runtest()
 
 stack build --force-dirty --ghc-options '-DBREAKDB_OMIT_COMMIT'
 runtest 0 0
+runtest e 0
 runtest 1 0
 runtest 2 0
 
 stack build --force-dirty
 runtest 0 0
+runtest e 0
 runtest 1 1
 runtest 2 2
 
