@@ -118,13 +118,13 @@ exec state cmd = case cmd of
     Rename x        -> pure $ Right [Renamed x]
 
     Deposit x
-        | x <= 0    -> pure $ Left "Deposits of less than 1 are not allowed"
+        | x < 1     -> pure $ Left "Deposits of less than 1 are not allowed"
         | otherwise -> pure $ Right [Deposited x]
 
     Withdraw x -> do
         (Balance bal) <- readTVar $ balance state -- here we express a fine-grained dependency
         pure $ if | x > bal   -> Left "Insufficient balance"
-                  | x <= 0    -> Left "Withdrawls of less than 1 are not allowed"
+                  | x < 1     -> Left "Withdrawls of less than 1 are not allowed"
                   | otherwise -> Right [Withdrew x]
 
 -- NB. there is no error checking here; events are facts and must be applied
