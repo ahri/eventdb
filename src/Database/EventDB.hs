@@ -121,7 +121,6 @@ writeEvents bss conn = withWrite conn $ \(fIdx, fLog) -> do
         [] -> pure $ (pIdxNext `natSubt` headerSizeBytes) `div` word64SizeBytes
         _  -> do
             -- write the event data
-            -- TODO: write timestamp?
             _ <- (flip traverse) bss $ writeAt (unLogFile fLog) pLogNext
 
             -- calculate new offsets
