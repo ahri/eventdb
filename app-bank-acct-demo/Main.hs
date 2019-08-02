@@ -34,9 +34,12 @@ data Event
     | Withdrew Integer
     deriving (Show, Read)
 
+data CommitLock = Locked | Unlocked deriving (Eq)
+
 main :: IO ()
 main = do
     let dir = "/tmp/eventdb-bank-acct-demo"
+    commitLock <- newTVarIO Unlocked
     state1 <- initialState
     s1init <- showState state1
 
@@ -46,7 +49,7 @@ main = do
 
     putStrLn "Executing random commands concurrently..."
     mapConcurrently_
-        (>>= transact conn state1)
+        (>>= transact conn commitLock state1)
         $ (replicate 10 $ randomCommand) <> [pure $ Rename "Jemima Schmidt"]
 
     -- store a representation of the original state
@@ -100,17 +103,14 @@ main = do
         (Balance b)    <- readTVarIO $ balance state
         pure $ "State '" <> h <> "' " <> show b
 
-transact :: Connection -> State TVar -> Command -> IO ()
-transact conn state cmd = do
-    evs <- atomically $ do
-        result <- exec state cmd
-        case result of
-            Left _    -> pure [] -- in this case we're just ignoring errors
-            Right evs -> do
-                apply state evs
-                pure $ evs
-
-    writeEvents (fmap (C.pack . show) evs) conn >> pure ()
+transact :: Connection -> TVar CommitLock -> State TVar -> Command -> IO ()
+transact conn commitLock state cmd = commit commitLock conn $ do
+    result <- exec state cmd
+    case result of
+        Left _    -> pure [] -- in this case we're just ignoring errors
+        Right evs -> do
+            apply state evs
+            pure $ fmap (C.pack . show) evs
 
 -- NB. all error checking happens here - isolation is in the control of client code
 exec :: State TVar -> Command -> STM (Either String [Event])
@@ -140,3 +140,15 @@ apply state evs = (flip traverse_) evs $ \case
     Withdrew  x -> do
         (Balance bal) <- readTVar $ balance state
         writeTVar (balance state) $ Balance $ bal - x
+
+commit :: TVar CommitLock -> Connection -> STM [C.ByteString] -> IO ()
+commit commitLock conn sbs = do
+    bs <- atomically $ do
+        lockStatus <- readTVar commitLock
+        when (lockStatus == Locked) retry
+        bs <- sbs
+        writeTVar commitLock Locked
+        pure bs
+
+    writeEvents bs conn >> pure ()
+    atomically $ writeTVar commitLock Unlocked
