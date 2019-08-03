@@ -40,4 +40,4 @@ runtest e 0
 runtest 1 1
 runtest 2 2
 
-echo -n "\nSuccess!"
+echo -n "\nSuccess!\n"

@@ -26,6 +26,7 @@ dependencies:
 - unix
 - directory
 - filepath
+- stm
 
 library:
   source-dirs: src
@@ -57,7 +58,6 @@ executables:
     dependencies:
     - eventdb
     - async
-    - stm
     - random
     - directory
 

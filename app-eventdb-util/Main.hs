@@ -6,6 +6,7 @@ module Main where
 
 import Data.Word
 import Control.Concurrent.Async
+import Control.Concurrent.STM
 import Control.Monad
 import qualified Data.ByteString.Lazy as B
 import qualified Data.Text as T
@@ -27,12 +28,10 @@ main = do
 
     let
         empty :: Connection -> IO ()
-        empty conn = writeEvents [] conn >> pure ()
+        empty conn = atomically $ writeEventsAsync [] conn
 
         spam :: T.Text -> Connection -> IO ()
-        spam msg conn = do
-            _ <- writeEvents [B.fromStrict $ T.encodeUtf8 msg] conn
-            pure ()
+        spam msg conn = atomically $ writeEventsAsync [B.fromStrict $ T.encodeUtf8 msg] conn
 
         listAll :: Connection -> IO ()
         listAll conn = do
@@ -49,7 +48,7 @@ main = do
             pure ()
 
     _ <- (flip traverse) optionalArgs $ \case
-        "thrash" -> forM_ [1..10::Int] $ \_ -> withConnection dir $ \conn ->
+        "thrash" -> forM_ [1..10::Int] $ \_ -> withConnection dir 1000 $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ spam "foo"
@@ -58,30 +57,30 @@ main = do
                 , listX 3
                 , spam "baz"
                 , listX 3
-                ] >> pure ()
+                ] >> awaitFlush conn
 
         -- takes 47.08s to read 3000 events 1000 times, so 300,000 events
-        "listall" -> forM_ [1..10::Int] $ \_ -> withConnection dir $ \conn ->
+        "listall" -> forM_ [1..10::Int] $ \_ -> withConnection dir 1000 $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ listAll
                 ] >> pure ()
 
-        "spam" -> withConnection dir $ \conn ->
+        "spam" -> withConnection dir 1000 $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ spam "foo"
                 , spam "bar"
                 , spam "baz"
-                ] >> pure ()
+                ] >> awaitFlush conn
 
-        "inspect" -> withConnection dir $ \conn -> do
+        "inspect" -> withConnection dir 1000 $ \conn -> do
             isConsistent <- inspect conn
             when (not isConsistent) exitFailure
 
-        "empty" -> withConnection dir empty
+        "empty" -> withConnection dir 1000 $ \conn -> empty conn >> awaitFlush conn
 
-        "single" -> withConnection dir $ spam "foo"
+        "single" -> withConnection dir 1000 $ \conn -> spam "foo" conn >> awaitFlush conn
 
         unknown -> do
             hPutStr stderr $ "Unknown arg: " <> unknown
