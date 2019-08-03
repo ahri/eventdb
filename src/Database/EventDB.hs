@@ -268,6 +268,7 @@ writeAt file addr bs = do
 #ifdef DEBUG
     putStrLn $ "Writing " <> _name <> ": @" <> show addr <> ", " <> show (B.length bs) <> " bytes"
 #endif
+    -- TODO: fdPwritev doesn't exist so there's an extra syscall here, consider calling pwritev(2) via foreign call
     _ <- fdSeek fd AbsoluteSeek $ fromIntegral addr
     _ <- B.fdWritev fd bs
     pure ()
