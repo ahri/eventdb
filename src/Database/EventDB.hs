@@ -15,7 +15,7 @@ module Database.EventDB
     , inspect
     ) where
 
-import Control.Exception
+import Control.Exception.Safe
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Monad
