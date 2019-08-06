@@ -21,7 +21,7 @@ main :: IO ()
 main = do
     args <- getArgs
     when (length args < 2) $ do
-        hPutStr stderr "Usage: dir_name [commands...]\n where commands are: spam, thrash, single, inspect\n"
+        hPutStr stderr "Usage: dir_name [commands...]\n where commands are: spam, thrash, single, triple, inspect\n"
         exitFailure
 
     let (dir:optionalArgs) = args
@@ -32,6 +32,12 @@ main = do
 
         spam :: T.Text -> Connection -> IO ()
         spam msg conn = atomically $ writeEventsAsync [B.fromStrict $ T.encodeUtf8 msg] conn
+
+        spamTriple :: T.Text -> Connection -> IO ()
+        spamTriple msg conn = atomically $ writeEventsAsync (take 3 $ repeat (B.fromStrict $ T.encodeUtf8 msg)) conn
+
+        triple :: Connection -> IO ()
+        triple conn = atomically $ writeEventsAsync (fmap (B.fromStrict . T.encodeUtf8) ["foo", "bar", "baz"]) conn
 
         listAll :: Connection -> IO ()
         listAll conn = do
@@ -70,7 +76,7 @@ main = do
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ spam "foo"
-                , spam "bar"
+                , spamTriple "bar"
                 , spam "baz"
                 ] >> awaitFlush conn
 
@@ -81,6 +87,8 @@ main = do
         "empty" -> withConnection dir 1000 $ \conn -> empty conn >> awaitFlush conn
 
         "single" -> withConnection dir 1000 $ \conn -> spam "foo" conn >> awaitFlush conn
+
+        "triple" -> withConnection dir 1000 $ \conn -> triple conn >> awaitFlush conn
 
         unknown -> do
             hPutStr stderr $ "Unknown arg: " <> unknown

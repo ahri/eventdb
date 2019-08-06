@@ -17,14 +17,21 @@ runtest()
 
 	rm -rf "$dir"
 	i=0
+	set +e
 	while [ $i -lt $runs ]; do
-		stack exec -- eventdb-util "$dir" single
+		result="`stack exec -- eventdb-util "$dir" single triple 2>&1`"
+		code=$?
+		if [ $code -ne 0 ]; then
+			echo "$result"
+			exit $code
+		fi
 		i=`expr $i + 1`
 	done
-	inspect=`stack exec -- eventdb-util "$dir" inspect`
-	if ! echo "$inspect" | grep -q "Expected count: $expected"; then
-		echo -n "Runs: $runs, expected: $expected\n\n$inspect"
-		exit 1
+	inspect="`stack exec -- eventdb-util "$dir" inspect 2>&1`"
+	code=$?
+	if [ $code -ne 0 ] || ! echo "$inspect" | grep -q "Expected count: $expected"; then
+		echo -n "Runs: $runs, expected count: $expected\n\n$inspect\n"
+		exit $code
 	fi
 }
 
@@ -37,7 +44,7 @@ runtest 2 0
 stack build --force-dirty
 runtest 0 0
 runtest e 0
-runtest 1 1
-runtest 2 2
+runtest 1 4
+runtest 2 8
 
 echo -n "\nSuccess!\n"

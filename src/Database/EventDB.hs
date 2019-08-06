@@ -23,7 +23,6 @@ import qualified Data.ByteString.Lazy as B
 import qualified System.Posix.IO.ByteString.Lazy as B
 import Data.Binary
 import Data.Foldable
-import Data.Monoid
 import Foreign.C.Types (CSize)
 import Foreign.Storable
 import GHC.IO.Device (SeekMode (..))
@@ -229,19 +228,27 @@ writeEvents fIdx fLog bss = case bss of
                         pLogNext <- fmap decode $ readFrom (unIdxFile fIdx) pIdxNext word64SizeBytes
                         pure (pIdxNext, pLogNext)
 
-        -- write the event data
-        _ <- (flip traverse) bss $ writeAt (unLogFile fLog) pLogNext
+        (pIdxNext', _) <- foldM
+            (\(pIdxNext', pLogNext') bs -> do
+                -- calculate new offsets
+                let pIdxNext'' = pIdxNext' + word64SizeBytes
+                    pLogNext'' = pLogNext' + (fromIntegral . B.length $ bs)
 
-        -- calculate new offsets
-        let pIdxNext' = pIdxNext + word64SizeBytes
-            pLogNext' = pLogNext + (getSum $ foldMap (Sum . fromIntegral . B.length) bss)
+                -- write the event data
+                writeAt (unLogFile fLog) pLogNext' bs
+                -- write index ptr for next time
+                writeAt (unIdxFile fIdx) pIdxNext'' $ encode pLogNext''
 
-        -- write index ptr for next time
-        writeAt (unIdxFile fIdx) pIdxNext' $ encode pLogNext'
+                pure (pIdxNext'', pLogNext'')
+            )
+            (pIdxNext, pLogNext)
+            bss
 
             -- commit
 #ifndef BREAKDB_OMIT_COMMIT
         writeAt (unIdxFile fIdx) magicSizeBytes $ encode pIdxNext'
+#else
+        pure ()
 #endif
 
 -- Unsafe - don't leak this outside the module, or use the ST trick
