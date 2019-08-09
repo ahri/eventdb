@@ -5,13 +5,15 @@
 
 module Database.EventDB
     ( Connection -- don't leak constructor
+    , IndexedEvent
     , openConnection
     , closeConnection
     , withConnection
     , eventCount
     , writeEventsAsync
     , awaitFlush
-    , readEventsFrom
+    , readEvents
+    , readEventsRange
     , inspect
     ) where
 
@@ -45,11 +47,15 @@ word64SizeBytes = fromIntegral $ sizeOf (0 :: Word64)
 headerSizeBytes :: Num a => a
 headerSizeBytes = magicSizeBytes + word64SizeBytes
 
+type IndexedEvent = (Word64, B.ByteString)
+
 -- | Represent a database connection.
 data Connection = Connection
     { pathIdx     :: FilePath
     , pathLog     :: FilePath
     , writeQueue  :: TBQueue [B.ByteString]
+    , readSubs    :: TChan IndexedEvent
+    , evCount     :: TVar Word64
     , writeThread :: ThreadId
     }
 
@@ -67,15 +73,44 @@ openConnection dir queueSize = do
     fdIdx <- openWriteSync pthIdx
     fdLog <- openWriteSync pthLog
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
-    let fIdx = (pthIdx, fdIdx)
-        fLog = (pthLog, fdLog)
+    let fIdx = IdxFile (pthIdx, fdIdx)
+        fLog = LogFile (pthLog, fdLog)
 
     -- init db if it's empty - also helps to fail fast if we don't have write perms
-    when (idxSize == 0) $ writeAt fIdx 0 magic
+    evCount' <- if idxSize == 0
+        then do
+            writeAt (unIdxFile fIdx) 0 magic
+            pure 0
+        else bracket
+            (fmap (IdxFile . (pthIdx,)) $ openFd pthIdx ReadOnly Nothing defaultFileFlags)
+            (closeFd . snd . unIdxFile)
+            eventCount'
 
     wq <- newTBQueueIO queueSize
+    rc <- newBroadcastTChanIO
+    ec <- newTVarIO evCount'
 
-    Connection pthIdx pthLog wq <$> forkWriteThread (IdxFile fIdx) (LogFile fLog) wq
+    -- TODO: check usages and order to see whether we can reduce use of `atomically`
+    let writeAndBroadcast evs = writeEvents fIdx fLog evs >>= atomically . traverse_ (writeTChan rc)
+
+    Connection pthIdx pthLog wq rc ec
+        <$> (forkIO $ bracket_
+                (pure ())
+                (do
+                    (atomically $ flushTBQueue wq) >>= (writeAndBroadcast . join)
+                    closeFd $ snd $ unLogFile fLog
+                    closeFd $ snd $ unIdxFile fIdx
+                )
+                (forever
+                    $  (atomically $ peekTBQueue wq)
+                    >>= writeAndBroadcast
+                    >>  (atomically $ do
+                            transactions <- readTBQueue wq
+                            ec' <- readTVar ec
+                            writeTVar ec $ ec' + (fromIntegral $ length transactions)
+                        )
+                )
+            )
 
   where
     pthIdx = joinPath [dir, "idx"]
@@ -85,20 +120,6 @@ openConnection dir queueSize = do
         fd <- openFd path ReadWrite (Just 0o644) defaultFileFlags
         setFdOption fd SynchronousWrites True -- TODO: consider O_DSYNC as a data sync may be quicker - http://man7.org/linux/man-pages/man2/fdatasync.2.html
         pure fd
-
-    forkWriteThread :: IdxFile -> LogFile -> TBQueue [B.ByteString] -> IO ThreadId
-    forkWriteThread fIdx fLog wq = forkIO $ bracket
-        (pure ())
-        (\() -> do
-            pendingTransactions <- atomically $ flushTBQueue wq
-            traverse_ (writeEvents fIdx fLog) pendingTransactions
-            closeFd $ snd $ unLogFile fLog
-            closeFd $ snd $ unIdxFile fIdx
-        )
-        (\() -> forever $ do
-            evs <- atomically $ readTBQueue wq
-            writeEvents fIdx fLog evs
-        )
 
 -- | Close a database connection.
 closeConnection :: Connection -> IO ()
@@ -111,9 +132,11 @@ withConnection dir queueSize = bracket
     closeConnection
 
 -- | Count of events currently stored in the database.
-eventCount :: Connection -> IO Word64
-eventCount conn = withRead conn $ \(fIdx, _) -> do
-    let file = unIdxFile fIdx
+eventCount :: Connection -> IO Word64 -- TODO: might as well be STM Word64 since it can just read the count from the conn
+eventCount = atomically . readTVar . evCount
+
+eventCount' :: IdxFile -> IO Word64
+eventCount' (IdxFile file) = do
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd file
     if idxSize == magicSizeBytes
         then pure 0
@@ -126,8 +149,8 @@ writeEventsAsync :: [B.ByteString] -> Connection -> STM ()
 writeEventsAsync bs conn = writeTBQueue (writeQueue conn) bs
 
 -- | Read all events from the specified index.
-readEventsFrom :: Word64 -> Connection -> IO [(Word64, B.ByteString)]
-readEventsFrom idx conn = withRead conn $ \(fIdx, fLog) -> do
+readEventsRange :: Word64 -> Word64 -> Connection -> IO [IndexedEvent]
+readEventsRange from to conn = withRead conn $ \(fIdx, fLog) -> do
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unIdxFile fIdx
     if idxSize == magicSizeBytes
         then pure []
@@ -138,14 +161,25 @@ readEventsFrom idx conn = withRead conn $ \(fIdx, fLog) -> do
                 then pure []
                 else do
                     let lastIdx = (pIdxNext `natSubt` headerSizeBytes) `div` word64SizeBytes
-                    (flip traverse) [idx..lastIdx] $ \i -> do
+                        to' = min lastIdx to
+                    (flip traverse) [from..to'] $ \i -> do
                         pLogStart <- if i == 0
                             then pure 0
                             else fmap decode $ readFrom (unIdxFile fIdx) (magicSizeBytes + (i * word64SizeBytes)) word64SizeBytes
                         pLogUpTo  <- fmap decode $ readFrom (unIdxFile fIdx) (magicSizeBytes + ((i+1) * word64SizeBytes)) word64SizeBytes
                         fmap (i,) $ readFrom (unLogFile fLog) pLogStart (fromIntegral $ pLogUpTo `natSubt` pLogStart)
 
--- | Block waiting for events to be written to the disk
+-- | Read all events from the specified index.
+readEvents :: Word64 -> Connection -> IO ([IndexedEvent], TChan IndexedEvent) -- TODO: maybe just return TChan?
+readEvents from conn = do
+    (ec, chan) <- atomically $ (,)
+        <$> (readTVar $ evCount conn)
+        <*> (dupTChan $ readSubs conn)
+
+    evsFromDisk <- readEventsRange from ec conn
+    pure (evsFromDisk, chan)
+
+-- | Block waiting for events to be written to the disk.
 awaitFlush :: Connection -> IO ()
 awaitFlush conn = atomically $ do
     empty <- isEmptyTBQueue $ writeQueue conn
@@ -180,7 +214,8 @@ inspect conn = withRead conn $ \(fIdx, fLog) -> do
     putStrLn $ "Expected count: " <> show expectedCount
     putStrLn $ "Count guess based on filesize: " <> show idxCount
 
-    len <- fmap length $ readEventsFrom 0 conn
+    ec <- eventCount conn
+    len <- fmap length $ readEventsRange 0 ec conn
     putStrLn $ "Actual read data count: " <> show len
     -- if not equal then invalid
     pLogNext :: Word64 <- if emptyDb
@@ -210,9 +245,9 @@ inspect conn = withRead conn $ \(fIdx, fLog) -> do
     -- TODO: instead of printing, construct a data type
     pure consistent
 
-writeEvents :: IdxFile -> LogFile -> [B.ByteString] -> IO ()
+writeEvents :: IdxFile -> LogFile -> [B.ByteString] -> IO [IndexedEvent]
 writeEvents fIdx fLog bss = case bss of
-    [] -> pure ()
+    [] -> pure []
     _  -> do
         -- determine where in the log to write
         idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus (snd $ unIdxFile fIdx)
@@ -244,14 +279,16 @@ writeEvents fIdx fLog bss = case bss of
             (pIdxNext, pLogNext)
             bss
 
-            -- commit
+        let firstIdxWritten = (idxSize `natSubt` magicSizeBytes) `div` word64SizeBytes
+
 #ifndef BREAKDB_OMIT_COMMIT
+        -- commit
         writeAt (unIdxFile fIdx) magicSizeBytes $ encode pIdxNext'
-#else
-        pure ()
 #endif
+        pure $ zip [firstIdxWritten..] bss
 
 -- Unsafe - don't leak this outside the module, or use the ST trick
+-- TODO: wasteful; this is used in places where the LogFile is never accessed (count), maybe best to delete it
 withRead :: Connection -> ((IdxFile, LogFile) -> IO a) -> IO a
 withRead conn = bracket
         ((,)

@@ -36,12 +36,9 @@ main = do
         spamTriple :: T.Text -> Connection -> IO ()
         spamTriple msg conn = atomically $ writeEventsAsync (take 3 $ repeat (B.fromStrict $ T.encodeUtf8 msg)) conn
 
-        triple :: Connection -> IO ()
-        triple conn = atomically $ writeEventsAsync (fmap (B.fromStrict . T.encodeUtf8) ["foo", "bar", "baz"]) conn
-
         listAll :: Connection -> IO ()
         listAll conn = do
-            _ <- (fmap.fmap.fmap) (T.decodeUtf8 . B.toStrict) $ readEventsFrom 0 conn
+            _ <- (fmap.fmap.fmap) (T.decodeUtf8 . B.toStrict) . fmap fst $ readEvents 0 conn
             pure ()
 
         listX :: Word64 -> Connection -> IO ()
@@ -50,7 +47,7 @@ main = do
             let c = if actualCount < count
                 then 0
                 else actualCount - count
-            _ <- (fmap.fmap.fmap) (T.decodeUtf8 . B.toStrict) $ readEventsFrom c conn
+            _ <- (fmap.fmap.fmap) (T.decodeUtf8 . B.toStrict) . fmap fst $ readEvents c conn
             pure ()
 
     _ <- (flip traverse) optionalArgs $ \case
@@ -88,7 +85,7 @@ main = do
 
         "single" -> withConnection dir 1000 $ \conn -> spam "foo" conn >> awaitFlush conn
 
-        "triple" -> withConnection dir 1000 $ \conn -> triple conn >> awaitFlush conn
+        "triple" -> withConnection dir 1000 $ \conn -> spamTriple "bar" conn >> awaitFlush conn
 
         unknown -> do
             hPutStr stderr $ "Unknown arg: " <> unknown

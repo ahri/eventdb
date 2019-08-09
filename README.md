@@ -13,7 +13,7 @@ locked to operate sequentially.
 Only POSIX (i.e. non-Windows) platforms are supported.
 
 
-## [ACiD](https://en.wikipedia.org/wiki/ACID)
+## [ACID](https://en.wikipedia.org/wiki/ACID)
 A database is expected to make guarantees about the data it holds, which are
 collectively known as "ACID". Note in particular that all guarantees hold only
 on systems/filesystems that honour the contract of
@@ -28,10 +28,10 @@ after each write, forcing data through the userspace and kernel to ensure it's
 flushed to the physical disk drive. Failures of a physical device to atomically
 write its buffers are not accounted for.
 
-The lowercase `i` above is to highlight that the responsibility of "isolation"
-is handed over to client code - probably using
-[STM](https://hackage.haskell.org/package/stm), rather than being supported
-directly in the database.
+Isolation is catered for via [STM](https://hackage.haskell.org/package/stm);
+writes are queued after an STM commit. Setting a queue size to `1` will result
+in immediate writes in cases where performance matters less than saving data
+quickly.
 
 ### Atomicity
 Grouped writes (i.e. transactions) to the database are guaranteed to be atomic,
@@ -70,3 +70,6 @@ on a laptop with a consumer-grade SSD.
 ## TODO
 - .cabal file with tested lower bounds
 - Haddocks
+- Property-based tests
+  - Randomly generated transactions, following close and read,
+    `output == join input`

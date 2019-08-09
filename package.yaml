@@ -32,8 +32,8 @@ dependencies:
 library:
   source-dirs: src
 
-# TODO: merge these executables back into app/
 executables:
+
   eventdb-util:
     main:                Main.hs
     source-dirs:         app-eventdb-util
@@ -47,6 +47,7 @@ executables:
     - eventdb
     - text
     - async
+
   bank-acct-demo:
     main:                Main.hs
     source-dirs:         app-bank-acct-demo
@@ -60,6 +61,20 @@ executables:
     - eventdb
     - async
     - random
+    - directory
+
+  client-demo:
+    main:                Main.hs
+    source-dirs:         app-client-demo
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -Wall
+    - -Werror
+    dependencies:
+    - eventdb
+    - async
     - directory
 
 # tests:

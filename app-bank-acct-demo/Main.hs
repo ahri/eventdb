@@ -36,7 +36,7 @@ data Event
 
 main :: IO ()
 main = do
-    let dir = "/tmp/eventdb-bank-acct-demo"
+    let dir = "/tmp/eventdb-bank-acct-demo" -- TODO: use getTemporaryDirectory
     state1 <- initialState
     s1init <- showState state1
 
@@ -63,12 +63,12 @@ main = do
     state2 <- initialState
     s2init <- showState state2
     putStrLn $ "\nReplaying events against " <> s2init
-    readEventsFrom 0 conn >>= traverse_
+    readEvents 0 conn >>= traverse_
         (\(_idx, ev) -> do
             let ev' :: Event = read . C.unpack $ ev
             print ev'
             atomically $ apply state2 [ev']
-        )
+        ) . fst
 
     -- store a representation of the replayed state
     s2 <- showState state2
