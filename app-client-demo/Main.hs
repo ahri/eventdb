@@ -10,7 +10,6 @@ import Database.EventDB
 import qualified Data.ByteString.Lazy.Char8 as C
 import Data.Foldable
 import Control.Monad
-import Control.Concurrent
 import Control.Concurrent.STM
 import System.Directory
 import System.Exit
@@ -26,12 +25,12 @@ main = do
     let (th:tt) = testData
 
     atomically $ writeEventsAsync (fmap serialise th) conn
-    waitForCount conn $ length th
+    atomically $ waitForCount conn $ length th
 
     (eh, evChan) <- readEvents 0 conn
 
     atomically $ traverse_ (\transaction -> writeEventsAsync (fmap serialise transaction) conn) tt
-    waitForCount conn $ length $ join testData
+    atomically $ waitForCount conn $ length $ join testData
 
     sinkVal <- fmap (reverse . fmap (deserialise . snd)) $ atomically $ drain evChan eh
 
@@ -52,9 +51,7 @@ main = do
         count' <- fmap fromIntegral $ eventCount conn
         if count' >= count
             then pure ()
-            else do
-                threadDelay 1000
-                waitForCount conn count
+            else waitForCount conn count
 
     drain :: forall a. TChan a -> [a] -> STM [a]
     drain chan lst = do

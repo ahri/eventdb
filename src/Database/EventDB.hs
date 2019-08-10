@@ -84,31 +84,32 @@ openConnection dir queueSize = do
         else bracket
             (fmap (IdxFile . (pthIdx,)) $ openFd pthIdx ReadOnly Nothing defaultFileFlags)
             (closeFd . snd . unIdxFile)
-            eventCount'
+            eventCountFromFS
 
     wq <- newTBQueueIO queueSize
     rc <- newBroadcastTChanIO
     ec <- newTVarIO evCount'
 
-    -- TODO: check usages and order to see whether we can reduce use of `atomically`
-    let writeAndBroadcast evs = writeEvents fIdx fLog evs >>= atomically . traverse_ (writeTChan rc)
+    let broadcast = traverse_ (writeTChan rc)
 
     Connection pthIdx pthLog wq rc ec
         <$> (forkIO $ bracket_
                 (pure ())
                 (do
-                    (atomically $ flushTBQueue wq) >>= (writeAndBroadcast . join)
+                    (atomically $ flushTBQueue wq)
+                        >>= writeEvents fIdx fLog . join
+                        >>= atomically . broadcast
                     closeFd $ snd $ unLogFile fLog
                     closeFd $ snd $ unIdxFile fIdx
                 )
                 (forever
-                    $  (atomically $ peekTBQueue wq)
-                    >>= writeAndBroadcast
-                    >>  (atomically $ do
-                            transactions <- readTBQueue wq
-                            ec' <- readTVar ec
-                            writeTVar ec $ ec' + (fromIntegral $ length transactions)
-                        )
+                    $   (atomically $ peekTBQueue wq)
+                    >>= writeEvents fIdx fLog
+                    >>= \evs -> atomically $ do
+                        broadcast evs
+                        transactions <- readTBQueue wq
+                        ec' <- readTVar ec
+                        writeTVar ec $ ec' + (fromIntegral $ length transactions)
                 )
             )
 
@@ -132,11 +133,11 @@ withConnection dir queueSize = bracket
     closeConnection
 
 -- | Count of events currently stored in the database.
-eventCount :: Connection -> IO Word64 -- TODO: might as well be STM Word64 since it can just read the count from the conn
-eventCount = atomically . readTVar . evCount
+eventCount :: Connection -> STM Word64
+eventCount = readTVar . evCount
 
-eventCount' :: IdxFile -> IO Word64
-eventCount' (IdxFile file) = do
+eventCountFromFS :: IdxFile -> IO Word64
+eventCountFromFS (IdxFile file) = do
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd file
     if idxSize == magicSizeBytes
         then pure 0
@@ -189,7 +190,6 @@ awaitFlush conn = atomically $ do
 inspect :: Connection -> IO Bool
 inspect conn = withRead conn $ \(fIdx, fLog) -> do
     -- TODO: should catch exceptions here really
-    -- TODO: no longer locks reads - could result in inconsistent results - it's only for test though so does it matter?
     awaitFlush conn
 
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unIdxFile fIdx
@@ -214,7 +214,7 @@ inspect conn = withRead conn $ \(fIdx, fLog) -> do
     putStrLn $ "Expected count: " <> show expectedCount
     putStrLn $ "Count guess based on filesize: " <> show idxCount
 
-    ec <- eventCount conn
+    ec <- atomically $ eventCount conn
     len <- fmap length $ readEventsRange 0 ec conn
     putStrLn $ "Actual read data count: " <> show len
     -- if not equal then invalid
@@ -288,7 +288,6 @@ writeEvents fIdx fLog bss = case bss of
         pure $ zip [firstIdxWritten..] bss
 
 -- Unsafe - don't leak this outside the module, or use the ST trick
--- TODO: wasteful; this is used in places where the LogFile is never accessed (count), maybe best to delete it
 withRead :: Connection -> ((IdxFile, LogFile) -> IO a) -> IO a
 withRead conn = bracket
         ((,)

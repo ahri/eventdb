@@ -43,7 +43,7 @@ main = do
 
         listX :: Word64 -> Connection -> IO ()
         listX count conn = do
-            actualCount <- eventCount conn
+            actualCount <- atomically $ eventCount conn
             let c = if actualCount < count
                 then 0
                 else actualCount - count
