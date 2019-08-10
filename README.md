@@ -69,6 +69,14 @@ on a laptop with a consumer-grade SSD.
 
 ## TODO
 - .cabal file with tested lower bounds
+- Streaming test:
+  - write 512MB of data
+  - call `readEvents 0`
+  - write another 512MB of data
+  - quit once all data has been consumed (Sum it)
+  - verify max memory usage
+  - improve `readEvents` api to single TChan if possible
+- Add execution of demo apps to sanity check
 - Haddocks
 - Property-based tests
   - Randomly generated transactions, following close and read,

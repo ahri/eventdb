@@ -25,12 +25,12 @@ main = do
     let (th:tt) = testData
 
     atomically $ writeEventsAsync (fmap serialise th) conn
-    atomically $ waitForCount conn $ length th
+    waitForCount conn $ length th
 
     (eh, evChan) <- readEvents 0 conn
 
     atomically $ traverse_ (\transaction -> writeEventsAsync (fmap serialise transaction) conn) tt
-    atomically $ waitForCount conn $ length $ join testData
+    waitForCount conn $ length $ join testData
 
     sinkVal <- fmap (reverse . fmap (deserialise . snd)) $ atomically $ drain evChan eh
 
@@ -47,11 +47,12 @@ main = do
     serialise = C.pack . show
     deserialise = read . C.unpack
 
-    waitForCount conn count = do
-        count' <- fmap fromIntegral $ eventCount conn
-        if count' >= count
-            then pure ()
-            else waitForCount conn count
+    waitForCount conn count = atomically go
+      where go = do
+                count' <- fmap fromIntegral $ eventCount conn
+                if count' >= count
+                    then pure ()
+                    else go
 
     drain :: forall a. TChan a -> [a] -> STM [a]
     drain chan lst = do
