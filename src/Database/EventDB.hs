@@ -96,9 +96,13 @@ openConnection dir queueSize = do
         <$> (forkIO $ bracket_
                 (pure ())
                 (do
-                    (atomically $ flushTBQueue wq)
-                        >>= writeEvents fIdx fLog . join
-                        >>= atomically . broadcast
+                    transactions <- atomically $ flushTBQueue wq
+                    traverse_
+                        (\transaction -> writeEvents fIdx fLog transaction
+                            >>= atomically . broadcast
+                        )
+                        transactions
+
                     closeFd $ snd $ unLogFile fLog
                     closeFd $ snd $ unIdxFile fIdx
                 )

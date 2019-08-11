@@ -74,7 +74,45 @@ executables:
     - -Werror
     dependencies:
     - eventdb
-    - async
+    - directory
+
+  mem-profile-file-write:
+    main:                Main.hs
+    source-dirs:         app-mem-profile-file-write
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -Wall
+    - -Werror
+    dependencies:
+    - eventdb
+    - directory
+
+  mem-profile-file-read:
+    main:                Main.hs
+    source-dirs:         app-mem-profile-file-read
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -Wall
+    - -Werror
+    dependencies:
+    - eventdb
+    - directory
+
+  mem-profile-stream-read:
+    main:                Main.hs
+    source-dirs:         app-mem-profile-stream-read
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -Wall
+    - -Werror
+    dependencies:
+    - eventdb
     - directory
 
 # tests:

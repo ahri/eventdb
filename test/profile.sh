@@ -15,8 +15,7 @@ done
 
 cd "`dirname "$0"`/.."
 stack build --profile
-rm -rf "$dir" eventdb-util.prof eventdb-util.eventlog eventdb-util.prof.html eventdb-util.hp eventdb-util.svg
+rm -rf "$dir" *.prof *.eventlog *.prof.html *.hp *.svg
 stack exec -- eventdb-util +RTS -p -N2 -lf -S -s -hd -RTS "$dir" thrash inspect
 hp2pretty eventdb-util.hp
 profiteur eventdb-util.prof
-git status
