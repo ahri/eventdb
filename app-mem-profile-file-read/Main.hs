@@ -17,7 +17,7 @@ main :: IO ()
 main = do
     (dir:_) <- getArgs
 
-    withConnection dir singleElementWriteBuffer $ \conn -> do
+    withConnection dir $ \conn -> do
         stream <- openEventStream 0 conn
         evs' <- newTVarIO []
         _ <- forkIO $ forever $ do
@@ -33,8 +33,6 @@ main = do
   where
     readInteger :: String -> Integer
     readInteger = read
-
-    singleElementWriteBuffer = 1
 
     waitFor sPred = atomically $ do
         res <- sPred

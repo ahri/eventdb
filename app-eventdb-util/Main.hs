@@ -48,7 +48,7 @@ main = do
             drain' c conn
 
     _ <- (flip traverse) optionalArgs $ \case
-        "thrash" -> forM_ [1..10::Int] $ \_ -> withConnection dir 1000 $ \conn ->
+        "thrash" -> forM_ [1..10::Int] $ \_ -> withConnection dir $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ spam "foo"
@@ -60,13 +60,13 @@ main = do
                 ]
 
         -- takes 47.08s to read 3000 events 1000 times, so 300,000 events
-        "listall" -> forM_ [1..10::Int] $ \_ -> withConnection dir 1000 $ \conn ->
+        "listall" -> forM_ [1..10::Int] $ \_ -> withConnection dir $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ listAll
                 ]
 
-        "spam" -> withConnection dir 1000 $ \conn ->
+        "spam" -> withConnection dir $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ spam "foo"
@@ -74,15 +74,15 @@ main = do
                 , spam "baz"
                 ] >> pure()
 
-        "inspect" -> withConnection dir 1000 $ \conn -> do
+        "inspect" -> withConnection dir $ \conn -> do
             isConsistent <- inspect conn
             when (not isConsistent) exitFailure
 
-        "empty" -> withConnection dir 1000 $ \conn -> empty conn
+        "empty" -> withConnection dir $ \conn -> empty conn
 
-        "single" -> withConnection dir 1000 $ \conn -> spam "foo" conn
+        "single" -> withConnection dir $ \conn -> spam "foo" conn
 
-        "triple" -> withConnection dir 1000 $ \conn -> spamTriple "bar" conn
+        "triple" -> withConnection dir $ \conn -> spamTriple "bar" conn
 
         unknown -> do
             hPutStr stderr $ "Unknown arg: " <> unknown

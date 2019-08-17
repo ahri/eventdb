@@ -23,7 +23,7 @@ main = do
     let mbs' = read mbs
     removePathForcibly dir
 
-    withConnection dir singleElementWriteBuffer $ \conn -> do
+    withConnection dir $ \conn -> do
         stream <- openEventStream 0 conn
         evs' <- newTVarIO []
         _ <- forkIO $ forever $ do
@@ -44,8 +44,6 @@ main = do
         print . getSum $ foldMap (Sum . readInteger . B.unpack . snd) evs
 
   where
-    singleElementWriteBuffer = 1
-
     readInteger :: String -> Integer
     readInteger = read
 

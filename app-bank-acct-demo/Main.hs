@@ -42,7 +42,7 @@ main = do
 
     putStrLn $ "Initialising " <> s1init <> " and creating DB in " <> show dir
     removePathForcibly dir
-    conn <- openConnection dir 1000
+    conn <- openConnection dir
 
     putStrLn "Executing random commands concurrently..."
     mapConcurrently_

@@ -21,7 +21,7 @@ main = do
     let dir = "/tmp/eventdb-client-demo" -- TODO: use getTemporaryDirectory
 
     removePathForcibly dir
-    conn <- openConnection dir 100
+    conn <- openConnection dir
 
     let (th:tt) = testData
 

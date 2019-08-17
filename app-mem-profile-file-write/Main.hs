@@ -19,13 +19,10 @@ main = do
     removePathForcibly dir
     let mbs' = read mbs
 
-    withConnection dir singleElementWriteBuffer $ \conn -> traverse_
+    withConnection dir $ \conn -> traverse_
         ( (\evs -> atomically $ writeEventsAsync evs conn)
         . pure
         . B.pack
         . printf "%01048576d"
         )
         [(1::Int)..mbs']
-
-  where
-    singleElementWriteBuffer = 1

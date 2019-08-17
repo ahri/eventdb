@@ -54,7 +54,7 @@ type IndexedEvent = (Word64, B.ByteString)
 data Connection = Connection
     { pathIdx     :: FilePath
     , pathLog     :: FilePath
-    , writeQueue  :: TBQueue [B.ByteString]
+    , writeQueue  :: TQueue [B.ByteString]
     , evCount     :: TVar Word64
     , writeThread :: ThreadId
     }
@@ -74,9 +74,8 @@ newtype LogFile = LogFile { unLogFile :: File } deriving (Eq, Show)
 -- | Open a database connection.
 openConnection
     :: FilePath      -- ^ directory housing the database, will be created if needed
-    -> Natural       -- ^ max number of transactions to queue before blocking (affects memory usage)
     -> IO Connection
-openConnection dir queueSize = do
+openConnection dir = do
     createDirectoryIfMissing False dir
     fdIdx <- openWriteSync pthIdx
     fdLog <- openWriteSync pthLog
@@ -94,14 +93,14 @@ openConnection dir queueSize = do
             (closeFd . snd . unIdxFile)
             eventCountFromFS
 
-    wq <- newTBQueueIO queueSize
+    wq <- newTQueueIO
     ec <- newTVarIO evCount'
 
     Connection pthIdx pthLog wq ec
         <$> (forkIO $ bracket_
                 (pure ())
                 (do
-                    transactions <- atomically $ flushTBQueue wq
+                    transactions <- atomically $ flushTQueue wq
                     traverse_
                         (writeEvents fIdx fLog)
                         transactions
@@ -110,10 +109,10 @@ openConnection dir queueSize = do
                     closeFd $ snd $ unIdxFile fIdx
                 )
                 (forever
-                    $   (atomically $ peekTBQueue wq)
+                    $   (atomically $ peekTQueue wq)
                     >>= writeEvents fIdx fLog
                     >> (atomically $ do
-                        transactions <- readTBQueue wq
+                        transactions <- readTQueue wq
                         ec' <- readTVar ec
                         writeTVar ec $ ec' + (fromIntegral $ length transactions)
                     )
@@ -134,9 +133,9 @@ closeConnection :: Connection -> IO ()
 closeConnection conn = killThread $ writeThread conn
 
 -- | Convenience function accepting a continuation for the connection. Opens and closes the connection for you.
-withConnection :: FilePath -> Natural -> (Connection -> IO a) -> IO a
-withConnection dir queueSize = bracket
-    (openConnection dir queueSize)
+withConnection :: FilePath -> (Connection -> IO a) -> IO a
+withConnection dir = bracket
+    (openConnection dir)
     closeConnection
 
 -- | Count of events currently stored in the database.
@@ -155,7 +154,7 @@ eventCountFromFS (IdxFile file) = do
 
 -- | Write a series of events as a single atomic transaction.
 writeEventsAsync :: [B.ByteString] -> Connection -> STM ()
-writeEventsAsync bs conn = writeTBQueue (writeQueue conn) bs
+writeEventsAsync bs conn = writeTQueue (writeQueue conn) bs
 
 -- | Open an event stream.
 openEventStream :: Word64 -> Connection -> IO Stream
@@ -206,7 +205,7 @@ readEventFromFS fIdx fLog idx = do
 -- | Block waiting for the write queue to flush to disk.
 awaitFlush :: Connection -> IO ()
 awaitFlush conn = atomically $ do
-    empty <- isEmptyTBQueue $ writeQueue conn
+    empty <- isEmptyTQueue $ writeQueue conn
     unless empty retry
 
 -- | Inspect a database, verifying its consistency and reporting on extraneous bytes leftover from failed writes, returning a simple notion of consistency.
