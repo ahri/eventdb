@@ -50,6 +50,7 @@ main = do
         $ (replicate 10 $ randomCommand) <> [pure $ Rename "Jemima Schmidt"]
 
     awaitFlush conn
+    count <- atomically $ eventCount conn
 
     -- store a representation of the original state
     s1 <- showState state1
@@ -63,12 +64,18 @@ main = do
     state2 <- initialState
     s2init <- showState state2
     putStrLn $ "\nReplaying events against " <> s2init
-    readEvents 0 conn >>= traverse_
-        (\(_idx, ev) -> do
+    
+    stream <- openEventStream 0 conn
+    let applyAllEventsTo state = do
+            (idx, ev) <- readEvent stream
             let ev' :: Event = read . C.unpack $ ev
             print ev'
-            atomically $ apply state2 [ev']
-        ) . fst
+            atomically $ apply state [ev']
+            if idx == count - 1
+                then pure ()
+                else applyAllEventsTo state
+
+    applyAllEventsTo state2
 
     -- store a representation of the replayed state
     s2 <- showState state2

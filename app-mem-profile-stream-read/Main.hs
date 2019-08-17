@@ -6,7 +6,9 @@ module Main where
 
 import Database.EventDB
 
+import Control.Concurrent
 import Control.Concurrent.STM
+import Control.Monad
 import qualified Data.ByteString.Lazy.Char8 as B
 import Data.Foldable
 import Data.Monoid
@@ -22,7 +24,11 @@ main = do
     removePathForcibly dir
 
     withConnection dir singleElementWriteBuffer $ \conn -> do
-        (_, chan) <- readEvents 0 conn
+        stream <- openEventStream 0 conn
+        evs' <- newTVarIO []
+        _ <- forkIO $ forever $ do
+            ev <- readEvent stream
+            atomically $ modifyTVar evs' (\evs -> ev:evs)
 
         traverse_
             ( (\evs -> atomically $ writeEventsAsync evs conn)
@@ -32,11 +38,10 @@ main = do
             )
             [(1::Int)..mbs']
 
-        awaitFlush conn
+        waitFor (fmap ((==mbs') . length) $ readTVar evs')
 
-        evs <- atomically $ drain chan []
+        evs <- fmap reverse $ readTVarIO evs'
         print . getSum $ foldMap (Sum . readInteger . B.unpack . snd) evs
-
 
   where
     singleElementWriteBuffer = 1
@@ -44,11 +49,6 @@ main = do
     readInteger :: String -> Integer
     readInteger = read
 
-    drain :: forall a. TChan a -> [a] -> STM [a]
-    drain chan lst = do
-        empty <- isEmptyTChan chan
-        if empty
-            then pure lst
-            else do
-                val <- readTChan chan
-                drain chan (val:lst)
+    waitFor sPred = atomically $ do
+        res <- sPred
+        unless res retry

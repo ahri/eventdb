@@ -5,15 +5,16 @@
 
 module Database.EventDB
     ( Connection -- don't leak constructor
+    , Stream -- don't leak constructor
     , IndexedEvent
     , openConnection
     , closeConnection
     , withConnection
     , eventCount
     , writeEventsAsync
+    , openEventStream
+    , readEvent
     , awaitFlush
-    , readEvents
-    , readEventsRange
     , inspect
     ) where
 
@@ -49,14 +50,21 @@ headerSizeBytes = magicSizeBytes + word64SizeBytes
 
 type IndexedEvent = (Word64, B.ByteString)
 
--- | Represent a database connection.
+-- | A database connection.
 data Connection = Connection
     { pathIdx     :: FilePath
     , pathLog     :: FilePath
     , writeQueue  :: TBQueue [B.ByteString]
-    , readSubs    :: TChan IndexedEvent
     , evCount     :: TVar Word64
     , writeThread :: ThreadId
+    }
+
+-- | An event stream.
+data Stream = Stream
+    { streamConn  :: Connection
+    , streamIndex :: TVar Word64
+    , fReadIdx    :: IdxFile
+    , fReadLog    :: LogFile
     }
 
 type File = (FilePath, Fd)
@@ -82,25 +90,20 @@ openConnection dir queueSize = do
             writeAt (unIdxFile fIdx) 0 magic
             pure 0
         else bracket
-            (fmap (IdxFile . (pthIdx,)) $ openFd pthIdx ReadOnly Nothing defaultFileFlags)
+            (fmap IdxFile $ openReadOnly pthIdx)
             (closeFd . snd . unIdxFile)
             eventCountFromFS
 
     wq <- newTBQueueIO queueSize
-    rc <- newBroadcastTChanIO
     ec <- newTVarIO evCount'
 
-    let broadcast = traverse_ (writeTChan rc)
-
-    Connection pthIdx pthLog wq rc ec
+    Connection pthIdx pthLog wq ec
         <$> (forkIO $ bracket_
                 (pure ())
                 (do
                     transactions <- atomically $ flushTBQueue wq
                     traverse_
-                        (\transaction -> writeEvents fIdx fLog transaction
-                            >>= atomically . broadcast
-                        )
+                        (writeEvents fIdx fLog)
                         transactions
 
                     closeFd $ snd $ unLogFile fLog
@@ -109,11 +112,11 @@ openConnection dir queueSize = do
                 (forever
                     $   (atomically $ peekTBQueue wq)
                     >>= writeEvents fIdx fLog
-                    >>= \evs -> atomically $ do
-                        broadcast evs
+                    >> (atomically $ do
                         transactions <- readTBQueue wq
                         ec' <- readTVar ec
                         writeTVar ec $ ec' + (fromIntegral $ length transactions)
+                    )
                 )
             )
 
@@ -147,48 +150,64 @@ eventCountFromFS (IdxFile file) = do
         then pure 0
         else do
             pIdxNext :: Word64 <- fmap decode $ readFrom file magicSizeBytes word64SizeBytes
+            -- NB. even if pIdxNext is 0 here (i.e. first write was partial, so the commit is missing), the `div` works
             pure $ pIdxNext `div` word64SizeBytes
 
 -- | Write a series of events as a single atomic transaction.
 writeEventsAsync :: [B.ByteString] -> Connection -> STM ()
 writeEventsAsync bs conn = writeTBQueue (writeQueue conn) bs
 
--- | Read all events from the specified index.
-readEventsRange :: Word64 -> Word64 -> Connection -> IO [IndexedEvent]
-readEventsRange from to conn = withRead conn $ \(fIdx, fLog) -> do
-    idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unIdxFile fIdx
-    if idxSize == magicSizeBytes
-        then pure []
+-- | Open an event stream.
+openEventStream :: Word64 -> Connection -> IO Stream
+openEventStream from conn = Stream conn
+    <$> newTVarIO from
+    <*> (fmap IdxFile $ openReadOnly (pathIdx conn))
+    <*> (fmap LogFile $ openReadOnly (pathLog conn))
+
+-- | Read an event. Blocks if none are available.
+readEvent :: Stream -> IO IndexedEvent
+readEvent stream = do
+    -- wait until db has one ready
+    idx <- atomically $ do
+        idx <- readTVar $ streamIndex stream
+        count <- readTVar $ evCount $ streamConn stream
+        unless (idx < count) retry
+        pure idx
+
+    -- read it
+    evt <- readEventFromFS (fReadIdx stream) (fReadLog stream) idx
+
+    -- update our state
+    atomically $ writeTVar (streamIndex stream) (idx + 1)
+
+    pure evt
+
+readEventFromFS :: IdxFile -> LogFile -> Word64 -> IO IndexedEvent
+readEventFromFS fIdx fLog idx = do
+    -- resolve ptrs
+    (pLogFrom, pLogTo) <- if idx == 0
+        then do
+            pLogTo <- readFrom
+                (unIdxFile fIdx)
+                (headerSizeBytes + (word64SizeBytes * idx))
+                word64SizeBytes
+            pure (0, decode pLogTo)
+
         else do
-            pIdxNext :: Word64 <- fmap decode $ readFrom (unIdxFile fIdx) magicSizeBytes word64SizeBytes
-            let missingCommit = pIdxNext == 0
-            if missingCommit
-                then pure []
-                else do
-                    let lastIdx = (pIdxNext `natSubt` headerSizeBytes) `div` word64SizeBytes
-                        to' = min lastIdx to
-                    (flip traverse) [from..to'] $ \i -> do
-                        pLogStart <- if i == 0
-                            then pure 0
-                            else fmap decode $ readFrom (unIdxFile fIdx) (magicSizeBytes + (i * word64SizeBytes)) word64SizeBytes
-                        pLogUpTo  <- fmap decode $ readFrom (unIdxFile fIdx) (magicSizeBytes + ((i+1) * word64SizeBytes)) word64SizeBytes
-                        fmap (i,) $ readFrom (unLogFile fLog) pLogStart (fromIntegral $ pLogUpTo `natSubt` pLogStart)
+            (pLogFrom, pLogTo) <- fmap (B.splitAt word64SizeBytes) $ readFrom
+                (unIdxFile fIdx)
+                (headerSizeBytes + (word64SizeBytes * (idx - 1)))
+                (word64SizeBytes*2)
+            pure (decode pLogFrom, decode pLogTo)
 
--- | Read all events from the specified index.
-readEvents :: Word64 -> Connection -> IO ([IndexedEvent], TChan IndexedEvent) -- TODO: maybe just return TChan?
-readEvents from conn = do
-    (ec, chan) <- atomically $ (,)
-        <$> (readTVar $ evCount conn)
-        <*> (dupTChan $ readSubs conn)
+    -- read data
+    fmap (idx,) $ readFrom (unLogFile fLog) pLogFrom (fromIntegral $ pLogTo - pLogFrom)
 
-    evsFromDisk <- readEventsRange from ec conn
-    pure (evsFromDisk, chan)
-
--- | Block waiting for events to be written to the disk.
+-- | Block waiting for the write queue to flush to disk.
 awaitFlush :: Connection -> IO ()
 awaitFlush conn = atomically $ do
     empty <- isEmptyTBQueue $ writeQueue conn
-    when (not empty) retry
+    unless empty retry
 
 -- | Inspect a database, verifying its consistency and reporting on extraneous bytes leftover from failed writes, returning a simple notion of consistency.
 inspect :: Connection -> IO Bool
@@ -218,10 +237,8 @@ inspect conn = withRead conn $ \(fIdx, fLog) -> do
     putStrLn $ "Expected count: " <> show expectedCount
     putStrLn $ "Count guess based on filesize: " <> show idxCount
 
-    ec <- atomically $ eventCount conn
-    len <- fmap length $ readEventsRange 0 ec conn
-    putStrLn $ "Actual read data count: " <> show len
-    -- if not equal then invalid
+    openEventStream 0 conn >>= drain
+
     pLogNext :: Word64 <- if emptyDb
         then pure 0
         else fmap decode $ readFrom (unIdxFile fIdx) pIdxNext' word64SizeBytes
@@ -239,7 +256,6 @@ inspect conn = withRead conn $ \(fIdx, fLog) -> do
     putStrLn ""
 
     let consistent = (idxCount >= expectedCount)
-            && (fromIntegral len == expectedCount)
             && (logSize >= pLogNext)
 
     putStrLn $ if consistent
@@ -248,6 +264,17 @@ inspect conn = withRead conn $ \(fIdx, fLog) -> do
 
     -- TODO: instead of printing, construct a data type
     pure consistent
+
+  where
+    drain stream = do
+        count <- atomically $ eventCount conn
+        if count == 0
+            then pure ()
+            else do
+                (idx, _) <- readEvent stream
+                if count - 1 == idx
+                    then pure ()
+                    else drain stream
 
 writeEvents :: IdxFile -> LogFile -> [B.ByteString] -> IO [IndexedEvent]
 writeEvents fIdx fLog bss = case bss of
@@ -295,14 +322,8 @@ writeEvents fIdx fLog bss = case bss of
 withRead :: Connection -> ((IdxFile, LogFile) -> IO a) -> IO a
 withRead conn = bracket
         ((,)
-            <$> (do
-                    fdIdx <- openFd (pathIdx conn) ReadOnly Nothing defaultFileFlags
-                    pure $ IdxFile (pathIdx conn, fdIdx)
-                )
-            <*> (do
-                    fdLog <- openFd (pathLog conn) ReadOnly Nothing defaultFileFlags
-                    pure $ LogFile (pathLog conn, fdLog)
-                )
+            <$> (fmap IdxFile $ openReadOnly (pathIdx conn))
+            <*> (fmap LogFile $ openReadOnly (pathLog conn))
         )
         (\(fIdx, fLog) -> do
             closeFd $ snd $ unLogFile fLog
@@ -332,3 +353,6 @@ natSubt :: Word64 -> Word64 -> Word64
 natSubt x y = if y > x
     then 0
     else x - y
+
+openReadOnly :: FilePath -> IO File
+openReadOnly path = fmap (path,) $ openFd path ReadOnly Nothing defaultFileFlags

@@ -37,9 +37,7 @@ main = do
         spamTriple msg conn = atomically $ writeEventsAsync (take 3 $ repeat (B.fromStrict $ T.encodeUtf8 msg)) conn
 
         listAll :: Connection -> IO ()
-        listAll conn = do
-            _ <- (fmap.fmap.fmap) (T.decodeUtf8 . B.toStrict) . fmap fst $ readEvents 0 conn
-            pure ()
+        listAll conn = drain conn
 
         listX :: Word64 -> Connection -> IO ()
         listX count conn = do
@@ -47,8 +45,7 @@ main = do
             let c = if actualCount < count
                 then 0
                 else actualCount - count
-            _ <- (fmap.fmap.fmap) (T.decodeUtf8 . B.toStrict) . fmap fst $ readEvents c conn
-            pure ()
+            drain' c conn
 
     _ <- (flip traverse) optionalArgs $ \case
         "thrash" -> forM_ [1..10::Int] $ \_ -> withConnection dir 1000 $ \conn ->
@@ -60,14 +57,14 @@ main = do
                 , listX 3
                 , spam "baz"
                 , listX 3
-                ] >> awaitFlush conn
+                ]
 
         -- takes 47.08s to read 3000 events 1000 times, so 300,000 events
         "listall" -> forM_ [1..10::Int] $ \_ -> withConnection dir 1000 $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ listAll
-                ] >> pure ()
+                ]
 
         "spam" -> withConnection dir 1000 $ \conn ->
             mapConcurrently
@@ -75,20 +72,33 @@ main = do
                 [ spam "foo"
                 , spamTriple "bar"
                 , spam "baz"
-                ] >> awaitFlush conn
+                ] >> pure()
 
         "inspect" -> withConnection dir 1000 $ \conn -> do
             isConsistent <- inspect conn
             when (not isConsistent) exitFailure
 
-        "empty" -> withConnection dir 1000 $ \conn -> empty conn >> awaitFlush conn
+        "empty" -> withConnection dir 1000 $ \conn -> empty conn
 
-        "single" -> withConnection dir 1000 $ \conn -> spam "foo" conn >> awaitFlush conn
+        "single" -> withConnection dir 1000 $ \conn -> spam "foo" conn
 
-        "triple" -> withConnection dir 1000 $ \conn -> spamTriple "bar" conn >> awaitFlush conn
+        "triple" -> withConnection dir 1000 $ \conn -> spamTriple "bar" conn
 
         unknown -> do
             hPutStr stderr $ "Unknown arg: " <> unknown
             exitFailure
 
     pure ()
+
+  where
+    drain conn = do
+        count <- atomically $ eventCount conn
+        drain' count conn
+
+    drain' count conn = openEventStream 0 conn >>= drain'' count
+
+    drain'' count stream = do
+        (idx, _) <- readEvent stream
+        if count - 1 == idx
+            then pure ()
+            else drain'' count stream

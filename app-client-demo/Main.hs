@@ -10,6 +10,7 @@ import Database.EventDB
 import qualified Data.ByteString.Lazy.Char8 as C
 import Data.Foldable
 import Control.Monad
+import Control.Concurrent
 import Control.Concurrent.STM
 import System.Directory
 import System.Exit
@@ -25,18 +26,22 @@ main = do
     let (th:tt) = testData
 
     atomically $ writeEventsAsync (fmap serialise th) conn
-    waitForCount conn $ length th
+    awaitFlush conn
 
-    (eh, evChan) <- readEvents 0 conn
+    stream <- openEventStream 0 conn
+    sinkVal' <- newTVarIO []
+    _ <- forkIO $ forever $ do
+        ev <- fmap (deserialise . snd) $ readEvent stream
+        atomically $ modifyTVar sinkVal' (\evs -> ev:evs)
 
     atomically $ traverse_ (\transaction -> writeEventsAsync (fmap serialise transaction) conn) tt
-    waitForCount conn $ length $ join testData
+    let expectedLen = length $ join testData
+    waitFor (fmap ((==expectedLen) . length) $ readTVar sinkVal')
 
-    sinkVal <- fmap (reverse . fmap (deserialise . snd)) $ atomically $ drain evChan eh
+    sinkVal <- fmap reverse $ readTVarIO sinkVal'
 
     when (join testData /= sinkVal) $ do
         putStrLn "Failure: data value & order must match exactly"
-        print $ deserialise $ snd $ head eh
         print $ join testData
         print sinkVal
         exitFailure
@@ -47,18 +52,6 @@ main = do
     serialise = C.pack . show
     deserialise = read . C.unpack
 
-    waitForCount conn count = atomically go
-      where go = do
-                count' <- fmap fromIntegral $ eventCount conn
-                if count' >= count
-                    then pure ()
-                    else go
-
-    drain :: forall a. TChan a -> [a] -> STM [a]
-    drain chan lst = do
-        empty <- isEmptyTChan chan
-        if empty
-            then pure lst
-            else do
-                val <- readTChan chan
-                drain chan (val:lst)
+    waitFor sPred = atomically $ do
+        res <- sPred
+        unless res retry

@@ -69,8 +69,8 @@ on a laptop with a consumer-grade SSD.
 
 ## TODO
 - .cabal file with tested lower bounds
-- Address problems highlighted by [memory profiling](test/memprofile.sh) to get
-  streaming behaviour
+- Address write buffering in STM highlighted by
+  [memory profiling](test/memprofile.sh) to get blocking behaviour
 - Add execution of demo apps (and memory profiling?) to sanity check
 - Haddocks
 - Property-based tests
