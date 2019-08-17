@@ -9,6 +9,9 @@ a relational/graph database).
 The database is thread-safe for concurrent reads/writes, though writes are
 locked to operate sequentially.
 
+For more insight into the event driven/sourced programming style, see
+[Practical event driven & sourced programs in Haskell](https://www.ahri.net/2019/07/practical-event-driven-and-sourced-programs-in-haskell/).
+
 ## Platforms
 Only POSIX (i.e. non-Windows) platforms are supported.
 
