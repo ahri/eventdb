@@ -71,9 +71,10 @@ write errors, allowing tests on consistency - see
 on a laptop with a consumer-grade SSD.
 
 ## TODO
-- .cabal file with tested lower bounds
-- Add execution of demo apps (and memory profiling?) to sanity check
 - Haddocks
+- Test using [dejafu](https://hackage.haskell.org/package/dejafu)
+- Benchmark against the [streaming benchmarks](https://github.com/composewell/streaming-benchmarks)
 - Property-based tests
   - Randomly generated transactions, following close and read,
     `output == join input`
+- .cabal file with tested lower bounds

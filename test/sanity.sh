@@ -47,4 +47,15 @@ runtest e 0
 runtest 1 4
 runtest 2 8
 
+mem_profile_dir=/tmp/eventdb-mem-profile
+for app in \
+		bank-acct-demo \
+		client-demo \
+		"mem-profile-file-write $mem_profile_dir 2" \
+		"mem-profile-file-read $mem_profile_dir" \
+		"mem-profile-stream-read $mem_profile_dir" \
+		; do
+	stack exec -- $app
+done
+
 echo -n "\nSuccess!\n"
