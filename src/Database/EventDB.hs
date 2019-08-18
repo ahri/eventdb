@@ -13,9 +13,11 @@ module Database.EventDB
     , eventCount
     , writeEventsAsync
     , openEventStream
+    , closeEventStream
+    , withEventStream
     , readEvent
-    , awaitFlush
-    , inspect
+    , awaitFlush -- TODO: would be nice to remove this
+    , inspect -- TODO: would be nice to remove this
     ) where
 
 import Control.Exception.Safe
@@ -50,19 +52,26 @@ headerSizeBytes = magicSizeBytes + word64SizeBytes
 
 type IndexedEvent = (Word64, B.ByteString)
 
+data State = Open | Closed deriving (Eq, Show)
+
 -- | A database connection.
 data Connection = Connection
-    { pathIdx     :: FilePath
-    , pathLog     :: FilePath
-    , writeQueue  :: TQueue [B.ByteString]
-    , evCount     :: TVar Word64
-    , writeThread :: ThreadId
+    { connState    :: TVar State
+    , pathIdx      :: FilePath
+    , pathLog      :: FilePath
+    , writeQueue   :: TQueue [B.ByteString]
+    , evCount      :: TVar Word64
+    , nextStreamId :: TVar Natural
+    , streams      :: TVar [Stream]
+    , writeThread  :: ThreadId
     }
 
 -- | An event stream.
 data Stream = Stream
-    { streamConn  :: Connection
-    , streamIndex :: TVar Word64
+    { streamId    :: Natural
+    , streamConn  :: Connection
+    , streamState :: TVar State
+    , eventIndex  :: TVar Word64
     , fReadIdx    :: IdxFile
     , fReadLog    :: LogFile
     }
@@ -93,10 +102,14 @@ openConnection dir = do
             (closeFd . snd . unIdxFile)
             eventCountFromFS
 
+    -- TODO: applicative style
+    st <- newTVarIO Open
     wq <- newTQueueIO
     ec <- newTVarIO evCount'
+    ns <- newTVarIO 0
+    ss <- newTVarIO []
 
-    Connection pthIdx pthLog wq ec
+    Connection st pthIdx pthLog wq ec ns ss
         <$> (forkIO $ bracket_
                 (pure ())
                 (do
@@ -107,6 +120,10 @@ openConnection dir = do
 
                     closeFd $ snd $ unLogFile fLog
                     closeFd $ snd $ unIdxFile fIdx
+
+                    streams' <- readTVarIO ss
+                    traverse_ closeEventStream streams'
+                    atomically $ writeTVar ss []
                 )
                 (forever
                     $   (atomically $ peekTQueue wq)
@@ -130,7 +147,10 @@ openConnection dir = do
 
 -- | Close a database connection.
 closeConnection :: Connection -> IO ()
-closeConnection conn = killThread $ writeThread conn
+closeConnection conn = join . atomically $ assertConnState Open conn $ do
+    -- design decision: casade behaviour from thread death rather than the state to avoid async exception mistakes
+    atomically $ writeTVar (connState conn) Closed
+    killThread $ writeThread conn
 
 -- | Convenience function accepting a continuation for the connection. Opens and closes the connection for you.
 withConnection :: FilePath -> (Connection -> IO a) -> IO a
@@ -140,7 +160,7 @@ withConnection dir = bracket
 
 -- | Count of events currently stored in the database.
 eventCount :: Connection -> STM Word64
-eventCount = readTVar . evCount
+eventCount conn = join $ assertConnState Open conn $ readTVar $ evCount conn
 
 eventCountFromFS :: IdxFile -> IO Word64
 eventCountFromFS (IdxFile file) = do
@@ -154,21 +174,59 @@ eventCountFromFS (IdxFile file) = do
 
 -- | Write a series of events as a single atomic transaction.
 writeEventsAsync :: [B.ByteString] -> Connection -> STM ()
-writeEventsAsync bs conn = writeTQueue (writeQueue conn) bs
+writeEventsAsync bs conn = join $ assertConnState Open conn $ writeTQueue (writeQueue conn) bs
 
 -- | Open an event stream.
 openEventStream :: Word64 -> Connection -> IO Stream
-openEventStream from conn = Stream conn
-    <$> newTVarIO from
-    <*> (fmap IdxFile $ openReadOnly (pathIdx conn))
-    <*> (fmap LogFile $ openReadOnly (pathLog conn))
+openEventStream from conn = join . atomically $ assertConnState Open conn $ do
+    nxt <- readTVarIO $ nextStreamId conn
+    stream <- Stream
+        <$> pure nxt
+        <*> pure conn
+        <*> newTVarIO Open
+        <*> newTVarIO from
+        <*> (fmap IdxFile $ openReadOnly (pathIdx conn))
+        <*> (fmap LogFile $ openReadOnly (pathLog conn))
+
+    atomically $ do
+        streams' <- readTVar $ streams conn
+        writeTVar (streams conn) $ stream : streams'
+        writeTVar (nextStreamId conn) $ nxt + 1
+
+    pure stream
+
+-- | Close an event stream.
+closeEventStream :: Stream -> IO ()
+closeEventStream stream = join . atomically $ assertStreamState Open stream $ do
+    atomically $ do
+        let streams' = streams $ streamConn stream
+        ss <- readTVar streams'
+        let idx = streamId stream
+        let filtered = foldr
+                (\x xs ->
+                    if streamId x == idx
+                        then xs
+                        else x : xs
+                )
+                []
+                ss
+        writeTVar streams' filtered
+
+    closeFd $ snd $ unLogFile $ fReadLog stream
+    closeFd $ snd $ unIdxFile $ fReadIdx stream
+
+-- | Convenience function accepting a continuation for the stream. Opens and closes the stream for you.
+withEventStream :: Word64 -> Connection -> (Stream -> IO a) -> IO a
+withEventStream from conn = bracket
+    (openEventStream from conn)
+    closeEventStream
 
 -- | Read an event. Blocks if none are available.
 readEvent :: Stream -> IO IndexedEvent
-readEvent stream = do
+readEvent stream = join . atomically $ assertStreamState Open stream $ do
     -- wait until db has one ready
     idx <- atomically $ do
-        idx <- readTVar $ streamIndex stream
+        idx <- readTVar $ eventIndex stream
         count <- readTVar $ evCount $ streamConn stream
         unless (idx < count) retry
         pure idx
@@ -177,7 +235,7 @@ readEvent stream = do
     evt <- readEventFromFS (fReadIdx stream) (fReadLog stream) idx
 
     -- update our state
-    atomically $ writeTVar (streamIndex stream) (idx + 1)
+    atomically $ writeTVar (eventIndex stream) (idx + 1)
 
     pure evt
 
@@ -204,13 +262,13 @@ readEventFromFS fIdx fLog idx = do
 
 -- | Block waiting for the write queue to flush to disk.
 awaitFlush :: Connection -> IO ()
-awaitFlush conn = atomically $ do
+awaitFlush conn = join . atomically $ assertConnState Open conn $ atomically $ do
     empty <- isEmptyTQueue $ writeQueue conn
     unless empty retry
 
 -- | Inspect a database, verifying its consistency and reporting on extraneous bytes leftover from failed writes, returning a simple notion of consistency.
 inspect :: Connection -> IO Bool
-inspect conn = withRead conn $ \(fIdx, fLog) -> do
+inspect conn = join . atomically $ assertConnState Open conn $ withRead conn $ \(fIdx, fLog) -> do
     -- TODO: should catch exceptions here really
     awaitFlush conn
 
@@ -355,3 +413,17 @@ natSubt x y = if y > x
 
 openReadOnly :: FilePath -> IO File
 openReadOnly path = fmap (path,) $ openFd path ReadOnly Nothing defaultFileFlags
+
+assertConnState :: State -> Connection -> a -> STM a
+assertConnState state conn x = do
+    state' <- readTVar $ connState conn
+    if state' /= state
+        then error $ "Expected connection to be " <> show state
+        else pure x
+
+assertStreamState :: State -> Stream -> a -> STM a
+assertStreamState state stream x = do
+    state' <- readTVar $ streamState stream
+    if state' /= state
+        then error $ "Expected stream to be " <> show state
+        else pure x
