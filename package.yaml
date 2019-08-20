@@ -1,13 +1,14 @@
 name:                eventdb
 version:             0.1.0.0
 github:              "ahri/eventdb"
-license:             BSD3
+license:             Apache-2.0
 author:              "Adam Piper"
 maintainer:          "adam@ahri.net"
 copyright:           "2019"
 
 extra-source-files:
 - README.md
+- LICENSE
 
 # Metadata used when publishing your package
 # synopsis:            A simple database to store a stream of events (facts) and retrieve them by index

@@ -3,7 +3,7 @@ Module      : Database.EventDB
 Description : An ACID-compliant and reasonably efficient database in which to
               store arbitrary binary events.
 Copyright   : (c) Adam Piper, 2019
-License     : MIT
+License     : Apache 2.0
 Maintainer  : adam@ahri.net
 Stability   : experimental
 Portability : POSIX
