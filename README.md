@@ -71,7 +71,8 @@ write errors, allowing tests on consistency - see
 on a laptop with a consumer-grade SSD.
 
 ## TODO
-- Haddocks
+- Add ACD tests to sanity check
+- [doctest](https://hackage.haskell.org/package/doctest) to keep examples legit
 - Test using [dejafu](https://hackage.haskell.org/package/dejafu)
 - Benchmark against the [streaming benchmarks](https://github.com/composewell/streaming-benchmarks)
 - Property-based tests

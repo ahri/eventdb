@@ -24,14 +24,14 @@ main = do
     removePathForcibly dir
 
     withConnection dir $ \conn -> do
-        stream <- openEventStream 0 conn
+        stream <- openStream 0 conn
         evs' <- newTVarIO []
         _ <- forkIO $ forever $ do
             ev <- readEvent stream
             atomically $ modifyTVar evs' (\evs -> ev:evs)
 
         traverse_
-            ( (\evs -> atomically $ writeEventsAsync evs conn)
+            ( (\evs -> atomically $ writeEvents evs conn)
             . pure
             . B.pack
             . printf "%01048576d"

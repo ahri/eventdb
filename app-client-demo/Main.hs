@@ -25,18 +25,24 @@ main = do
 
     let (th:tt) = testData
 
-    atomically $ writeEventsAsync (fmap serialise th) conn
-    awaitFlush conn
+    atomically $ writeEvents (fmap serialise th) conn
 
-    stream <- openEventStream 0 conn
+    waitFor $ fmap (== (fromIntegral $ length th)) $ eventCount conn 
+
+    stream <- openStream 0 conn
     sinkVal' <- newTVarIO []
     _ <- forkIO $ forever $ do
         ev <- fmap (deserialise . snd) $ readEvent stream
         atomically $ modifyTVar sinkVal' (\evs -> ev:evs)
 
-    atomically $ traverse_ (\transaction -> writeEventsAsync (fmap serialise transaction) conn) tt
+    -- prove that streaming can span previous written data as well as new events
+    atomically $ do
+        len <- fmap length $ readTVar sinkVal'
+        unless (len > 0) retry
+
+    atomically $ traverse_ (\transaction -> writeEvents (fmap serialise transaction) conn) tt
     let expectedLen = length $ join testData
-    waitFor (fmap ((==expectedLen) . length) $ readTVar sinkVal')
+    waitFor $ fmap ((==expectedLen) . length) $ readTVar sinkVal'
 
     sinkVal <- fmap reverse $ readTVarIO sinkVal'
 

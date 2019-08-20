@@ -29,10 +29,11 @@ runtest()
 	done
 	inspect="`stack exec -- eventdb-util "$dir" inspect 2>&1`"
 	code=$?
-	if [ $code -ne 0 ] || ! echo "$inspect" | grep -q "Expected count: $expected"; then
+	if [ $code -ne 0 ] || ! echo "$inspect" | grep -q "Index count: $expected"; then
 		echo -n "Runs: $runs, expected count: $expected\n\n$inspect\n"
 		exit $code
 	fi
+	set -e
 }
 
 stack build --force-dirty --ghc-options '-DBREAKDB_OMIT_COMMIT'
@@ -53,9 +54,16 @@ for app in \
 		client-demo \
 		"mem-profile-file-write $mem_profile_dir 2" \
 		"mem-profile-file-read $mem_profile_dir" \
-		"mem-profile-stream-read $mem_profile_dir" \
+		"mem-profile-stream-read $mem_profile_dir 2" \
 		; do
 	stack exec -- $app
 done
+
+ haddock_cover=`stack haddock 2>&1 | grep "[0-9]*% ( [0-9]* / [0-9]*) in 'Database\\.EventDB'"`
+ if ! echo $haddock_cover | grep -q 100%; then
+	 echo "Incomplete haddocks:"
+	 echo $haddock_cover
+	 exit 1
+ fi
 
 echo -n "\nSuccess!\n"

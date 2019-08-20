@@ -1,3 +1,25 @@
+{-|
+Module      : Database.EventDB
+Description : An ACID-compliant and reasonably efficient database in which to
+              store arbitrary binary events.
+Copyright   : (c) Adam Piper, 2019
+License     : MIT
+Maintainer  : adam@ahri.net
+Stability   : experimental
+Portability : POSIX
+
+A simple database to store a stream of events (facts) and retrieve them by
+index. This is aimed at systems based on Event Sourcing where
+complex state modelling/querying is left to other subsystems (e.g. your app, or
+a relational/graph database).
+
+The database is thread-safe for concurrent reads/writes, though writes are
+locked to operate sequentially.
+
+For more insight into the event driven/sourced programming style, see
+<https://www.ahri.net/2019/07/practical-event-driven-and-sourced-programs-in-haskell/>.
+-}
+
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TupleSections #-}
@@ -5,19 +27,19 @@
 
 module Database.EventDB
     ( Connection -- don't leak constructor
-    , Stream -- don't leak constructor
+    , Stream     -- don't leak constructor
+    , Status (..)
     , IndexedEvent
     , openConnection
     , closeConnection
     , withConnection
     , eventCount
-    , writeEventsAsync
-    , openEventStream
-    , closeEventStream
-    , withEventStream
+    , writeEvents
+    , openStream
+    , closeStream
+    , withStream
     , readEvent
-    , awaitFlush -- TODO: would be nice to remove this
-    , inspect -- TODO: would be nice to remove this
+    , inspect
     ) where
 
 import Control.Exception.Safe
@@ -50,11 +72,13 @@ word64SizeBytes = fromIntegral $ sizeOf (0 :: Word64)
 headerSizeBytes :: Num a => a
 headerSizeBytes = magicSizeBytes + word64SizeBytes
 
+-- | An event zipped with its position in the database.
 type IndexedEvent = (Word64, B.ByteString)
 
 data State = Open | Closed deriving (Eq, Show)
 
--- | A database connection.
+-- | A database connection. This is a mutable structure tracking allocated
+-- resources.
 data Connection = Connection
     { connState    :: TVar State
     , pathIdx      :: FilePath
@@ -66,7 +90,19 @@ data Connection = Connection
     , writeThread  :: ThreadId
     }
 
--- | An event stream.
+-- | The status of a database.
+data Status = Status
+    { indexCount         :: Word64 -- ^ number of events in the index
+    , indexFileSizeBytes :: Word64 -- ^ size in bytes of the index
+    , logFileSizeBytes   :: Word64 -- ^ size in bytes of the log
+    , indexExcessBytes   :: Word64 -- ^ number of excess bytes in index
+    , logExcessBytes     :: Word64 -- ^ number of excess bytes in log
+    , consistent         :: Bool   -- ^ a determination of whether or not the database is consistent
+    } deriving (Eq, Show)
+
+-- | An event stream. This is a mutable structure tracking a pointer to an index
+-- in the database allowing minimal memory usage when constructing an
+-- application state from the stream.
 data Stream = Stream
     { streamId    :: Natural
     , streamConn  :: Connection
@@ -115,19 +151,19 @@ openConnection dir = do
                 (do
                     transactions <- atomically $ flushTQueue wq
                     traverse_
-                        (writeEvents fIdx fLog)
+                        (writeEventsFS fIdx fLog)
                         transactions
 
                     closeFd $ snd $ unLogFile fLog
                     closeFd $ snd $ unIdxFile fIdx
 
                     streams' <- readTVarIO ss
-                    traverse_ closeEventStream streams'
+                    traverse_ closeStream streams'
                     atomically $ writeTVar ss []
                 )
                 (forever
                     $   (atomically $ peekTQueue wq)
-                    >>= writeEvents fIdx fLog
+                    >>= writeEventsFS fIdx fLog
                     >> (atomically $ do
                         transactions <- readTQueue wq
                         ec' <- readTVar ec
@@ -145,14 +181,14 @@ openConnection dir = do
         setFdOption fd SynchronousWrites True -- TODO: consider O_DSYNC as a data sync may be quicker - http://man7.org/linux/man-pages/man2/fdatasync.2.html
         pure fd
 
--- | Close a database connection.
+-- | Close a database connection. Writes all queued transactions, closes associated 'Stream's and frees all allocated resources.
 closeConnection :: Connection -> IO ()
 closeConnection conn = join . atomically $ assertConnState Open conn $ do
     -- design decision: casade behaviour from thread death rather than the state to avoid async exception mistakes
     atomically $ writeTVar (connState conn) Closed
     killThread $ writeThread conn
 
--- | Convenience function accepting a continuation for the connection. Opens and closes the connection for you.
+-- | Convenience function accepting a continuation for the connection. Opens and closes the connection, executing the continuation in an exception-safe context using 'bracket'.
 withConnection :: FilePath -> (Connection -> IO a) -> IO a
 withConnection dir = bracket
     (openConnection dir)
@@ -173,12 +209,12 @@ eventCountFromFS (IdxFile file) = do
             pure $ pIdxNext `div` word64SizeBytes
 
 -- | Write a series of events as a single atomic transaction.
-writeEventsAsync :: [B.ByteString] -> Connection -> STM ()
-writeEventsAsync bs conn = join $ assertConnState Open conn $ writeTQueue (writeQueue conn) bs
+writeEvents :: [B.ByteString] -> Connection -> STM ()
+writeEvents bs conn = join $ assertConnState Open conn $ writeTQueue (writeQueue conn) bs
 
 -- | Open an event stream.
-openEventStream :: Word64 -> Connection -> IO Stream
-openEventStream from conn = join . atomically $ assertConnState Open conn $ do
+openStream :: Word64 -> Connection -> IO Stream
+openStream from conn = join . atomically $ assertConnState Open conn $ do
     nxt <- readTVarIO $ nextStreamId conn
     stream <- Stream
         <$> pure nxt
@@ -195,9 +231,9 @@ openEventStream from conn = join . atomically $ assertConnState Open conn $ do
 
     pure stream
 
--- | Close an event stream.
-closeEventStream :: Stream -> IO ()
-closeEventStream stream = join . atomically $ assertStreamState Open stream $ do
+-- | Close an event stream. Frees allocated resources.
+closeStream :: Stream -> IO ()
+closeStream stream = join . atomically $ assertStreamState Open stream $ do
     atomically $ do
         let streams' = streams $ streamConn stream
         ss <- readTVar streams'
@@ -215,11 +251,11 @@ closeEventStream stream = join . atomically $ assertStreamState Open stream $ do
     closeFd $ snd $ unLogFile $ fReadLog stream
     closeFd $ snd $ unIdxFile $ fReadIdx stream
 
--- | Convenience function accepting a continuation for the stream. Opens and closes the stream for you.
-withEventStream :: Word64 -> Connection -> (Stream -> IO a) -> IO a
-withEventStream from conn = bracket
-    (openEventStream from conn)
-    closeEventStream
+-- | Convenience function accepting a continuation for the stream. Opens and closes the stream, executing the continuation in an exception-safe context using 'bracket'.
+withStream :: Word64 -> Connection -> (Stream -> IO a) -> IO a
+withStream from conn = bracket
+    (openStream from conn)
+    closeStream
 
 -- | Read an event. Blocks if none are available.
 readEvent :: Stream -> IO IndexedEvent
@@ -260,18 +296,14 @@ readEventFromFS fIdx fLog idx = do
     -- read data
     fmap (idx,) $ readFrom (unLogFile fLog) pLogFrom (fromIntegral $ pLogTo - pLogFrom)
 
--- | Block waiting for the write queue to flush to disk.
-awaitFlush :: Connection -> IO ()
-awaitFlush conn = join . atomically $ assertConnState Open conn $ atomically $ do
-    empty <- isEmptyTQueue $ writeQueue conn
-    unless empty retry
+{-| __WARNING: reads the whole DB, can be very expensive in terms of time and resources.__
 
--- | Inspect a database, verifying its consistency and reporting on extraneous bytes leftover from failed writes, returning a simple notion of consistency.
-inspect :: Connection -> IO Bool
-inspect conn = join . atomically $ assertConnState Open conn $ withRead conn $ \(fIdx, fLog) -> do
+    Inspect a database, verifying its consistency and reporting on extraneous
+    bytes leftover from failed writes, returning a simple notion of consistency.
+-}
+inspect :: FilePath -> IO Status
+inspect dir = withConnection dir $ \conn -> withRead conn $ \(fIdx, fLog) -> do
     -- TODO: should catch exceptions here really
-    awaitFlush conn
-
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unIdxFile fIdx
     logSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unLogFile fLog
 
@@ -288,13 +320,18 @@ inspect conn = join . atomically $ assertConnState Open conn $ withRead conn $ \
 
     let expectedCount = (pIdxNext' `natSubt` magicSizeBytes) `div` word64SizeBytes
     let idxCount = if emptyDb then 0 else (idxSize `natSubt` headerSizeBytes) `div` word64SizeBytes
-    putStrLn $ "Index file size (bytes): " <> show idxSize
-    putStrLn $ "Log file size (bytes): " <> show logSize
-    putStrLn ""
-    putStrLn $ "Expected count: " <> show expectedCount
-    putStrLn $ "Count guess based on filesize: " <> show idxCount
 
-    openEventStream 0 conn >>= drain
+    let drain stream = do
+            count <- atomically $ eventCount conn
+            if count == 0
+                then pure ()
+                else do
+                    (idx, _) <- readEvent stream
+                    if count - 1 == idx
+                        then pure ()
+                        else drain stream
+
+    openStream 0 conn >>= drain -- we do this just to evaluate all written data
 
     pLogNext :: Word64 <- if emptyDb
         then pure 0
@@ -303,38 +340,15 @@ inspect conn = join . atomically $ assertConnState Open conn $ withRead conn $ \
     let idxExcessBytes = if emptyDb
             then 0
             else idxSize `natSubt` (pIdxNext' + headerSizeBytes)
-        logExcessBytes = logSize `natSubt` pLogNext
+        logExcessBytes' = logSize `natSubt` pLogNext
 
-    putStrLn ""
-
-    putStrLn $ "Index excess bytes: " <> show idxExcessBytes
-    putStrLn $ "Log excess bytes: " <> show logExcessBytes
-
-    putStrLn ""
-
-    let consistent = (idxCount >= expectedCount)
+    let consistent' = (idxCount >= expectedCount)
             && (logSize >= pLogNext)
 
-    putStrLn $ if consistent
-        then "Consistent :)"
-        else "Inconsistent :("
+    pure $ Status expectedCount idxSize logSize idxExcessBytes logExcessBytes' consistent'
 
-    -- TODO: instead of printing, construct a data type
-    pure consistent
-
-  where
-    drain stream = do
-        count <- atomically $ eventCount conn
-        if count == 0
-            then pure ()
-            else do
-                (idx, _) <- readEvent stream
-                if count - 1 == idx
-                    then pure ()
-                    else drain stream
-
-writeEvents :: IdxFile -> LogFile -> [B.ByteString] -> IO [IndexedEvent]
-writeEvents fIdx fLog bss = case bss of
+writeEventsFS :: IdxFile -> LogFile -> [B.ByteString] -> IO [IndexedEvent]
+writeEventsFS fIdx fLog bss = case bss of
     [] -> pure []
     _  -> do
         -- determine where in the log to write
@@ -351,7 +365,7 @@ writeEvents fIdx fLog bss = case bss of
                         pLogNext <- fmap decode $ readFrom (unIdxFile fIdx) pIdxNext word64SizeBytes
                         pure (pIdxNext, pLogNext)
 
-        (pIdxNext', _) <- foldM
+        (_pIdxNext', _) <- foldM
             (\(pIdxNext', pLogNext') bs -> do
                 -- calculate new offsets
                 let pIdxNext'' = pIdxNext' + word64SizeBytes
@@ -371,7 +385,7 @@ writeEvents fIdx fLog bss = case bss of
 
 #ifndef BREAKDB_OMIT_COMMIT
         -- commit
-        writeAt (unIdxFile fIdx) magicSizeBytes $ encode pIdxNext'
+        writeAt (unIdxFile fIdx) magicSizeBytes $ encode _pIdxNext'
 #endif
         pure $ zip [firstIdxWritten..] bss
 

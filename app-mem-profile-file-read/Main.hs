@@ -18,7 +18,7 @@ main = do
     (dir:_) <- getArgs
 
     withConnection dir $ \conn -> do
-        stream <- openEventStream 0 conn
+        stream <- openStream 0 conn
         evs' <- newTVarIO []
         _ <- forkIO $ forever $ do
             ev <- readEvent stream

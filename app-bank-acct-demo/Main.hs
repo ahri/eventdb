@@ -42,52 +42,53 @@ main = do
 
     putStrLn $ "Initialising " <> s1init <> " and creating DB in " <> show dir
     removePathForcibly dir
-    conn <- openConnection dir
 
-    putStrLn "Executing random commands concurrently..."
-    mapConcurrently_
-        (>>= transact conn state1)
-        $ (replicate 10 $ randomCommand) <> [pure $ Rename "Jemima Schmidt"]
+    withConnection dir $ \conn -> do
+        putStrLn "Executing random commands concurrently..."
+        mapConcurrently_
+            (>>= transact conn state1)
+            $ (replicate 10 $ randomCommand) <> [pure $ Rename "Jemima Schmidt"]
 
-    awaitFlush conn
-    count <- atomically $ eventCount conn
+    -- reopen the DB to prove that all data was written
+    withConnection dir $ \conn -> do
+        count <- atomically $ eventCount conn
 
-    -- store a representation of the original state
-    s1 <- showState state1
+        -- store a representation of the original state
+        s1 <- showState state1
 
-    (Balance b) <- readTVarIO $ balance state1
-    putStrLn $ "Resulting state: " <> s1
-    when (b < 0) $ do
-        putStrLn "ERROR: Balance should never be below zero"
-        exitFailure
+        (Balance b) <- readTVarIO $ balance state1
+        putStrLn $ "Resulting state: " <> s1
+        when (b < 0) $ do
+            putStrLn "ERROR: Balance should never be below zero"
+            exitFailure
 
-    state2 <- initialState
-    s2init <- showState state2
-    putStrLn $ "\nReplaying events against " <> s2init
-    
-    stream <- openEventStream 0 conn
-    let applyAllEventsTo state = do
-            (idx, ev) <- readEvent stream
-            let ev' :: Event = read . C.unpack $ ev
-            print ev'
-            atomically $ apply state [ev']
-            if idx == count - 1
-                then pure ()
-                else applyAllEventsTo state
+        state2 <- initialState
+        s2init <- showState state2
+        putStrLn $ "\nReplaying events against " <> s2init
+        
+        stream <- openStream 0 conn
+        let applyAllEventsTo state = do
+                (idx, ev) <- readEvent stream
+                let ev' :: Event = read . C.unpack $ ev
+                print ev'
+                atomically $ apply state [ev']
+                if idx == count - 1
+                    then pure ()
+                    else applyAllEventsTo state
 
-    applyAllEventsTo state2
+        applyAllEventsTo state2
 
-    -- store a representation of the replayed state
-    s2 <- showState state2
+        -- store a representation of the replayed state
+        s2 <- showState state2
 
-    putStrLn "\nComparing states..."
-    let cmp = s1 == s2
+        putStrLn "\nComparing states..."
+        let cmp = s1 == s2
 
-    putStrLn $ s1 <> " == " <> s2 <> " ~ " <> show cmp
+        putStrLn $ s1 <> " == " <> s2 <> " ~ " <> show cmp
 
-    when (not cmp) $ do
-        putStrLn "ERROR: States should always be equal"
-        exitFailure
+        when (not cmp) $ do
+            putStrLn "ERROR: States should always be equal"
+            exitFailure
 
   where
     initialState = State <$> newTVarIO (AcctHolder "John Smith") <*> newTVarIO (Balance 0)
@@ -116,7 +117,7 @@ transact conn state cmd = atomically $ do
         Left _    -> pure () -- in this case we're just ignoring errors
         Right evs -> do
             apply state evs
-            writeEventsAsync (fmap (C.pack . show) evs) conn
+            writeEvents (fmap (C.pack . show) evs) conn
 
 -- NB. all error checking happens here - isolation is in the control of client code
 exec :: State TVar -> Command -> STM (Either String [Event])

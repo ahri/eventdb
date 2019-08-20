@@ -28,13 +28,13 @@ main = do
 
     let
         empty :: Connection -> IO ()
-        empty conn = atomically $ writeEventsAsync [] conn
+        empty conn = atomically $ writeEvents [] conn
 
         spam :: T.Text -> Connection -> IO ()
-        spam msg conn = atomically $ writeEventsAsync [B.fromStrict $ T.encodeUtf8 msg] conn
+        spam msg conn = atomically $ writeEvents [B.fromStrict $ T.encodeUtf8 msg] conn
 
         spamTriple :: T.Text -> Connection -> IO ()
-        spamTriple msg conn = atomically $ writeEventsAsync (take 3 $ repeat (B.fromStrict $ T.encodeUtf8 msg)) conn
+        spamTriple msg conn = atomically $ writeEvents (take 3 $ repeat (B.fromStrict $ T.encodeUtf8 msg)) conn
 
         listAll :: Connection -> IO ()
         listAll conn = drain conn
@@ -74,9 +74,10 @@ main = do
                 , spam "baz"
                 ] >> pure()
 
-        "inspect" -> withConnection dir $ \conn -> do
-            isConsistent <- inspect conn
-            when (not isConsistent) exitFailure
+        "inspect" -> do
+            status <- inspect dir
+            putStrLn $ "Index count: " <> (show $ indexCount status)
+            unless (consistent status) exitFailure
 
         "empty" -> withConnection dir $ \conn -> empty conn
 
@@ -95,7 +96,7 @@ main = do
         count <- atomically $ eventCount conn
         drain' count conn
 
-    drain' count conn = openEventStream 0 conn >>= drain'' count
+    drain' count conn = openStream 0 conn >>= drain'' count
 
     drain'' count stream = do
         (idx, _) <- readEvent stream

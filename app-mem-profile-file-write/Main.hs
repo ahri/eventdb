@@ -20,7 +20,7 @@ main = do
     let mbs' = read mbs
 
     withConnection dir $ \conn -> traverse_
-        ( (\evs -> atomically $ writeEventsAsync evs conn)
+        ( (\evs -> atomically $ writeEvents evs conn)
         . pure
         . B.pack
         . printf "%01048576d"
