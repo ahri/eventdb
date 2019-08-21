@@ -1,22 +1,18 @@
 name:                eventdb
 version:             0.1.0.0
-github:              "ahri/eventdb"
+github:              ahri/eventdb
 license:             Apache-2.0
-author:              "Adam Piper"
-maintainer:          "adam@ahri.net"
+author:              Adam Piper
+maintainer:          adam@ahri.net
 copyright:           "2019"
 
 extra-source-files:
 - README.md
 - LICENSE
 
-# Metadata used when publishing your package
-# synopsis:            A simple database to store a stream of events (facts) and retrieve them by index
-# category:            prototype
+category:            Database
+synopsis:            A simple database to store a stream of events and retrieve them by index
 
-# To avoid duplicated efforts in documentation and dealing with the
-# complications of embedding Haddock markup inside cabal files, it is
-# common to point users to the README.md file.
 description:         Please see the README on GitHub at <https://github.com/ahri/eventdb#readme>
 
 dependencies:
@@ -35,7 +31,6 @@ library:
 
   ghc-options:
   - -Wall
-  - -Werror
 
 executables:
 
@@ -47,7 +42,6 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     - -Wall
-    - -Werror
     dependencies:
     - eventdb
     - text
@@ -61,7 +55,6 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     - -Wall
-    - -Werror
     dependencies:
     - eventdb
     - async
@@ -76,7 +69,6 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     - -Wall
-    - -Werror
     dependencies:
     - eventdb
     - directory
@@ -89,7 +81,6 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     - -Wall
-    - -Werror
     dependencies:
     - eventdb
     - directory
@@ -102,7 +93,6 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     - -Wall
-    - -Werror
     dependencies:
     - eventdb
     - directory
@@ -115,7 +105,6 @@ executables:
     - -rtsopts
     - -with-rtsopts=-N
     - -Wall
-    - -Werror
     dependencies:
     - eventdb
     - directory

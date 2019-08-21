@@ -36,13 +36,13 @@ runtest()
 	set -e
 }
 
-stack build --force-dirty --ghc-options '-DBREAKDB_OMIT_COMMIT'
+stack build --force-dirty --pedantic --ghc-options '-DBREAKDB_OMIT_COMMIT'
 runtest 0 0
 runtest e 0
 runtest 1 0
 runtest 2 0
 
-stack build --force-dirty
+stack build --force-dirty --pedantic
 runtest 0 0
 runtest e 0
 runtest 1 4
