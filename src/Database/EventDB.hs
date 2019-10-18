@@ -90,6 +90,9 @@ data Connection = Connection
     , writeThread  :: ThreadId
     }
 
+instance Eq Connection where
+    cx == cy = writeThread cx == writeThread cy
+
 -- | The status of a database.
 data Status = Status
     { indexCount         :: Word64 -- ^ number of events in the index
@@ -111,6 +114,9 @@ data Stream = Stream
     , fReadIdx    :: IdxFile
     , fReadLog    :: LogFile
     }
+
+instance Eq Stream where
+    sx == sy = streamConn sx == streamConn sy && streamId sx == streamId sy
 
 type File = (FilePath, Fd)
 newtype IdxFile = IdxFile { unIdxFile :: File } deriving (Eq, Show)
