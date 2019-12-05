@@ -6,6 +6,7 @@ module Main where
 
 import Database.EventDB
 
+import qualified Data.ByteString.Lazy as B
 import qualified Data.ByteString.Lazy.Char8 as C
 import Data.Foldable
 import Control.Monad
@@ -43,14 +44,14 @@ main = do
     putStrLn $ "Initialising " <> s1init <> " and creating DB in " <> show dir
     removePathForcibly dir
 
-    withConnection dir $ \conn -> do
+    withConnection dir serialize deserialize $ \conn -> do
         putStrLn "Executing random commands concurrently..."
         mapConcurrently_
             (>>= transact conn state1)
             $ (replicate 10 $ randomCommand) <> [pure $ Rename "Jemima Schmidt"]
 
     -- reopen the DB to prove that all data was written
-    withConnection dir $ \conn -> do
+    withConnection dir serialize deserialize $ \conn -> do
         count <- atomically $ eventCount conn
 
         -- store a representation of the original state
@@ -69,9 +70,8 @@ main = do
         stream <- openStream 0 conn
         let applyAllEventsTo state = do
                 (idx, ev) <- readEvent stream
-                let ev' :: Event = read . C.unpack $ ev
-                print ev'
-                atomically $ apply state [ev']
+                print ev
+                atomically $ apply state [ev]
                 if idx == count - 1
                     then pure ()
                     else applyAllEventsTo state
@@ -93,6 +93,12 @@ main = do
   where
     initialState = State <$> newTVarIO (AcctHolder "John Smith") <*> newTVarIO (Balance 0)
 
+    serialize :: Event -> B.ByteString
+    serialize = C.pack . show
+
+    deserialize :: B.ByteString -> Event
+    deserialize = read . C.unpack
+
     randomCommand :: IO Command
     randomCommand = do
         cmd::Float <- randomIO
@@ -110,14 +116,14 @@ main = do
         (Balance b)    <- readTVarIO $ balance state
         pure $ "State '" <> h <> "' " <> show b
 
-transact :: Connection -> State TVar -> Command -> IO ()
+transact :: Connection Event -> State TVar -> Command -> IO ()
 transact conn state cmd = atomically $ do
     result <- exec state cmd
     case result of
         Left _    -> pure () -- in this case we're just ignoring errors
         Right evs -> do
             apply state evs
-            writeEvents (fmap (C.pack . show) evs) conn
+            writeEvents evs conn
 
 -- NB. all error checking happens here - isolation is in the control of client code
 exec :: State TVar -> Command -> STM (Either String [Event])

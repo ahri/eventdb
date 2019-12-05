@@ -23,7 +23,7 @@ main = do
     let mbs' = read mbs
     removePathForcibly dir
 
-    withConnection dir $ \conn -> do
+    withConnection dir id id $ \conn -> do
         stream <- openStream 0 conn
         evs' <- newTVarIO []
         _ <- forkIO $ forever $ do

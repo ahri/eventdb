@@ -19,7 +19,7 @@ main = do
     removePathForcibly dir
     let mbs' = read mbs
 
-    withConnection dir $ \conn -> traverse_
+    withConnection dir id id $ \conn -> traverse_
         ( (\evs -> atomically $ writeEvents evs conn)
         . pure
         . B.pack

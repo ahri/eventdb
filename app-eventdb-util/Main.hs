@@ -27,19 +27,19 @@ main = do
     let (dir:optionalArgs) = args
 
     let
-        empty :: Connection -> IO ()
+        empty :: Connection B.ByteString -> IO ()
         empty conn = atomically $ writeEvents [] conn
 
-        spam :: T.Text -> Connection -> IO ()
+        spam :: T.Text -> Connection B.ByteString -> IO ()
         spam msg conn = atomically $ writeEvents [B.fromStrict $ T.encodeUtf8 msg] conn
 
-        spamTriple :: T.Text -> Connection -> IO ()
+        spamTriple :: T.Text -> Connection B.ByteString -> IO ()
         spamTriple msg conn = atomically $ writeEvents (take 3 $ repeat (B.fromStrict $ T.encodeUtf8 msg)) conn
 
-        listAll :: Connection -> IO ()
+        listAll :: Connection B.ByteString -> IO ()
         listAll conn = drain conn
 
-        listX :: Word64 -> Connection -> IO ()
+        listX :: Word64 -> Connection B.ByteString -> IO ()
         listX count conn = do
             actualCount <- atomically $ eventCount conn
             let c = if actualCount < count
@@ -48,7 +48,7 @@ main = do
             drain' c conn
 
     _ <- (flip traverse) optionalArgs $ \case
-        "thrash" -> forM_ [1..10::Int] $ \_ -> withConnection dir $ \conn ->
+        "thrash" -> forM_ [1..10::Int] $ \_ -> withConnection dir id id $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ spam "foo"
@@ -60,13 +60,13 @@ main = do
                 ]
 
         -- takes 47.08s to read 3000 events 1000 times, so 300,000 events
-        "listall" -> forM_ [1..10::Int] $ \_ -> withConnection dir $ \conn ->
+        "listall" -> forM_ [1..10::Int] $ \_ -> withConnection dir id id $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ listAll
                 ]
 
-        "spam" -> withConnection dir $ \conn ->
+        "spam" -> withConnection dir id id $ \conn ->
             mapConcurrently
                 (\f -> forM_ [1..100::Int] $ \_ -> f conn)
                 [ spam "foo"
@@ -79,11 +79,11 @@ main = do
             putStrLn $ "Index count: " <> (show $ indexCount status)
             unless (consistent status) exitFailure
 
-        "empty" -> withConnection dir $ \conn -> empty conn
+        "empty" -> withConnection dir id id $ \conn -> empty conn
 
-        "single" -> withConnection dir $ \conn -> spam "foo" conn
+        "single" -> withConnection dir id id $ \conn -> spam "foo" conn
 
-        "triple" -> withConnection dir $ \conn -> spamTriple "bar" conn
+        "triple" -> withConnection dir id id $ \conn -> spamTriple "bar" conn
 
         unknown -> do
             hPutStr stderr $ "Unknown arg: " <> unknown

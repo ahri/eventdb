@@ -73,24 +73,26 @@ headerSizeBytes :: Num a => a
 headerSizeBytes = magicSizeBytes + word64SizeBytes
 
 -- | An event zipped with its position in the database.
-type IndexedEvent = (Word64, B.ByteString)
+type IndexedEvent a = (Word64, a)
 
 data State = Open | Closed deriving (Eq, Show)
 
 -- | A database connection. This is a mutable structure tracking allocated
 -- resources.
-data Connection = Connection
-    { connState    :: TVar State
-    , pathIdx      :: FilePath
-    , pathLog      :: FilePath
-    , writeQueue   :: TQueue [B.ByteString]
-    , evCount      :: TVar Word64
-    , nextStreamId :: TVar Natural
-    , streams      :: TVar [Stream]
-    , writeThread  :: ThreadId
+data Connection a = Connection
+    { connState      :: TVar State
+    , pathIdx        :: FilePath
+    , pathLog        :: FilePath
+    , writeQueue     :: TQueue [B.ByteString]
+    , evCount        :: TVar Word64
+    , nextStreamId   :: TVar Natural
+    , streams        :: TVar [Stream a]
+    , cEvSerialize   :: (a -> B.ByteString)
+    , cEvDeserialize :: (B.ByteString -> a)
+    , writeThread    :: ThreadId
     }
 
-instance Eq Connection where
+instance Eq (Connection a) where
     cx == cy = writeThread cx == writeThread cy
 
 -- | The status of a database.
@@ -106,16 +108,17 @@ data Status = Status
 -- | An event stream. This is a mutable structure tracking a pointer to an index
 -- in the database allowing minimal memory usage when constructing an
 -- application state from the stream.
-data Stream = Stream
-    { streamId    :: Natural
-    , streamConn  :: Connection
-    , streamState :: TVar State
-    , eventIndex  :: TVar Word64
-    , fReadIdx    :: IdxFile
-    , fReadLog    :: LogFile
+data Stream a = Stream
+    { streamId       :: Natural
+    , streamConn     :: Connection a
+    , streamState    :: TVar State
+    , eventIndex     :: TVar Word64
+    , fReadIdx       :: IdxFile
+    , fReadLog       :: LogFile
+    , sEvDeserialize :: (B.ByteString -> a)
     }
 
-instance Eq Stream where
+instance Eq (Stream a) where
     sx == sy = streamConn sx == streamConn sy && streamId sx == streamId sy
 
 type File = (FilePath, Fd)
@@ -124,9 +127,11 @@ newtype LogFile = LogFile { unLogFile :: File } deriving (Eq, Show)
 
 -- | Open a database connection.
 openConnection
-    :: FilePath      -- ^ directory housing the database, will be created if needed
-    -> IO Connection
-openConnection dir = do
+    :: FilePath            -- ^ directory housing the database, will be created if needed
+    -> (a -> B.ByteString) -- ^ event serialization function
+    -> (B.ByteString -> a) -- ^ event deserialization function
+    -> IO (Connection a)
+openConnection dir fS fD = do
     createDirectoryIfMissing False dir
     fdIdx <- openWriteSync pthIdx
     fdLog <- openWriteSync pthLog
@@ -144,14 +149,13 @@ openConnection dir = do
             (closeFd . snd . unIdxFile)
             eventCountFromFS
 
-    -- TODO: applicative style
     st <- newTVarIO Open
     wq <- newTQueueIO
     ec <- newTVarIO evCount'
     ns <- newTVarIO 0
     ss <- newTVarIO []
 
-    Connection st pthIdx pthLog wq ec ns ss
+    Connection st pthIdx pthLog wq ec ns ss fS fD
         <$> (forkIO $ bracket_
                 (pure ())
                 (do
@@ -188,20 +192,25 @@ openConnection dir = do
         pure fd
 
 -- | Close a database connection. Writes all queued transactions, closes associated 'Stream's and frees all allocated resources.
-closeConnection :: Connection -> IO ()
+closeConnection :: Connection a -> IO ()
 closeConnection conn = join . atomically $ assertConnState Open conn $ do
     -- design decision: casade behaviour from thread death rather than the state to avoid async exception mistakes
     atomically $ writeTVar (connState conn) Closed
     killThread $ writeThread conn
 
 -- | Convenience function accepting a continuation for the connection. Opens and closes the connection, executing the continuation in an exception-safe context using 'bracket'.
-withConnection :: FilePath -> (Connection -> IO a) -> IO a
-withConnection dir = bracket
-    (openConnection dir)
+withConnection
+    :: FilePath               -- ^ directory housing the database, will be created if needed
+    -> (a -> B.ByteString)    -- ^ event serialization function
+    -> (B.ByteString -> a)    -- ^ event deserialization function
+    -> (Connection a -> IO b) -- ^ action to execute with connection
+    -> IO b
+withConnection dir fS fD = bracket
+    (openConnection dir fS fD)
     closeConnection
 
 -- | Count of events currently stored in the database.
-eventCount :: Connection -> STM Word64
+eventCount :: Connection a -> STM Word64
 eventCount conn = join $ assertConnState Open conn $ readTVar $ evCount conn
 
 eventCountFromFS :: IdxFile -> IO Word64
@@ -215,11 +224,11 @@ eventCountFromFS (IdxFile file) = do
             pure $ pIdxNext `div` word64SizeBytes
 
 -- | Write a series of events as a single atomic transaction.
-writeEvents :: [B.ByteString] -> Connection -> STM ()
-writeEvents bs conn = join $ assertConnState Open conn $ writeTQueue (writeQueue conn) bs
+writeEvents :: [a] -> Connection a -> STM ()
+writeEvents evs conn = join $ assertConnState Open conn $ writeTQueue (writeQueue conn) (fmap (cEvSerialize conn) evs)
 
 -- | Open an event stream.
-openStream :: Word64 -> Connection -> IO Stream
+openStream :: Word64 -> Connection a -> IO (Stream a)
 openStream from conn = join . atomically $ assertConnState Open conn $ do
     nxt <- readTVarIO $ nextStreamId conn
     stream <- Stream
@@ -229,6 +238,7 @@ openStream from conn = join . atomically $ assertConnState Open conn $ do
         <*> newTVarIO from
         <*> (fmap IdxFile $ openReadOnly (pathIdx conn))
         <*> (fmap LogFile $ openReadOnly (pathLog conn))
+        <*> (pure $ cEvDeserialize conn)
 
     atomically $ do
         streams' <- readTVar $ streams conn
@@ -238,7 +248,7 @@ openStream from conn = join . atomically $ assertConnState Open conn $ do
     pure stream
 
 -- | Close an event stream. Frees allocated resources.
-closeStream :: Stream -> IO ()
+closeStream :: Stream a -> IO ()
 closeStream stream = join . atomically $ assertStreamState Open stream $ do
     atomically $ do
         let streams' = streams $ streamConn stream
@@ -258,13 +268,13 @@ closeStream stream = join . atomically $ assertStreamState Open stream $ do
     closeFd $ snd $ unIdxFile $ fReadIdx stream
 
 -- | Convenience function accepting a continuation for the stream. Opens and closes the stream, executing the continuation in an exception-safe context using 'bracket'.
-withStream :: Word64 -> Connection -> (Stream -> IO a) -> IO a
+withStream :: Word64 -> Connection a -> (Stream a -> IO b) -> IO b
 withStream from conn = bracket
     (openStream from conn)
     closeStream
 
 -- | Read an event. Blocks if none are available.
-readEvent :: Stream -> IO IndexedEvent
+readEvent :: Stream a -> IO (IndexedEvent a)
 readEvent stream = join . atomically $ assertStreamState Open stream $ do
     -- wait until db has one ready
     idx <- atomically $ do
@@ -274,14 +284,14 @@ readEvent stream = join . atomically $ assertStreamState Open stream $ do
         pure idx
 
     -- read it
-    evt <- readEventFromFS (fReadIdx stream) (fReadLog stream) idx
+    evt <- (fmap.fmap) (sEvDeserialize stream) $ readEventFromFS (fReadIdx stream) (fReadLog stream) idx
 
     -- update our state
     atomically $ writeTVar (eventIndex stream) (idx + 1)
 
     pure evt
 
-readEventFromFS :: IdxFile -> LogFile -> Word64 -> IO IndexedEvent
+readEventFromFS :: IdxFile -> LogFile -> Word64 -> IO (IndexedEvent B.ByteString)
 readEventFromFS fIdx fLog idx = do
     -- resolve ptrs
     (pLogFrom, pLogTo) <- if idx == 0
@@ -308,7 +318,7 @@ readEventFromFS fIdx fLog idx = do
     bytes leftover from failed writes, returning a simple notion of consistency.
 -}
 inspect :: FilePath -> IO Status
-inspect dir = withConnection dir $ \conn -> withRead conn $ \(fIdx, fLog) -> do
+inspect dir = withConnection dir id id $ \conn -> withRead conn $ \(fIdx, fLog) -> do
     -- TODO: should catch exceptions here really
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unIdxFile fIdx
     logSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus $ snd $ unLogFile fLog
@@ -353,7 +363,7 @@ inspect dir = withConnection dir $ \conn -> withRead conn $ \(fIdx, fLog) -> do
 
     pure $ Status expectedCount idxSize logSize idxExcessBytes logExcessBytes' consistent'
 
-writeEventsFS :: IdxFile -> LogFile -> [B.ByteString] -> IO [IndexedEvent]
+writeEventsFS :: IdxFile -> LogFile -> [B.ByteString] -> IO [IndexedEvent B.ByteString]
 writeEventsFS fIdx fLog bss = case bss of
     [] -> pure []
     _  -> do
@@ -396,7 +406,7 @@ writeEventsFS fIdx fLog bss = case bss of
         pure $ zip [firstIdxWritten..] bss
 
 -- Unsafe - don't leak this outside the module, or use the ST trick
-withRead :: Connection -> ((IdxFile, LogFile) -> IO a) -> IO a
+withRead :: Connection a -> ((IdxFile, LogFile) -> IO b) -> IO b
 withRead conn = bracket
         ((,)
             <$> (fmap IdxFile $ openReadOnly (pathIdx conn))
@@ -434,14 +444,14 @@ natSubt x y = if y > x
 openReadOnly :: FilePath -> IO File
 openReadOnly path = fmap (path,) $ openFd path ReadOnly Nothing defaultFileFlags
 
-assertConnState :: State -> Connection -> a -> STM a
+assertConnState :: State -> Connection a -> b -> STM b
 assertConnState state conn x = do
     state' <- readTVar $ connState conn
     if state' /= state
         then error $ "Expected connection to be " <> show state
         else pure x
 
-assertStreamState :: State -> Stream -> a -> STM a
+assertStreamState :: State -> Stream a -> b -> STM b
 assertStreamState state stream x = do
     state' <- readTVar $ streamState stream
     if state' /= state
