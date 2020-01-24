@@ -132,9 +132,21 @@ openConnection
     -> (B.ByteString -> a) -- ^ event deserialization function
     -> IO (Connection a)
 openConnection dir fS fD = do
-    createDirectoryIfMissing False dir
+    doesDirectoryExist dir >>= (\dirExists -> unless dirExists $ do
+        createDirectory dir
+        setFileMode dir 0o700
+        )
+
+    pthIdxExists <- doesFileExist pthIdx
+    pthLogExists <- doesFileExist pthLog
+
     fdIdx <- openWriteSync pthIdx
     fdLog <- openWriteSync pthLog
+
+    -- when first creating db files, try to be secure
+    unless pthIdxExists $ setFileMode pthIdx 0o600
+    unless pthLogExists $ setFileMode pthLog 0o600
+
     idxSize :: Word64 <- fmap (fromIntegral . fileSize) $ getFdStatus fdIdx
     let fIdx = IdxFile (pthIdx, fdIdx)
         fLog = LogFile (pthLog, fdLog)
@@ -187,7 +199,7 @@ openConnection dir fS fD = do
     pthLog = joinPath [dir, "log"]
 
     openWriteSync path = do
-        fd <- openFd path ReadWrite (Just 0o644) defaultFileFlags
+        fd <- openFd path ReadWrite (Just 0o600) defaultFileFlags
         setFdOption fd SynchronousWrites True -- TODO: consider O_DSYNC as a data sync may be quicker - http://man7.org/linux/man-pages/man2/fdatasync.2.html
         pure fd
 
