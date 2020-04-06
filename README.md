@@ -71,7 +71,6 @@ write errors, allowing tests on consistency - see
 on a laptop with a consumer-grade SSD.
 
 ## TODO
-- Add ACD tests to sanity check
 - [doctest](https://hackage.haskell.org/package/doctest) to keep examples legit
 - Test using [dejafu](https://hackage.haskell.org/package/dejafu)
 - Benchmark against the [streaming benchmarks](https://github.com/composewell/streaming-benchmarks)
@@ -79,3 +78,4 @@ on a laptop with a consumer-grade SSD.
   - Randomly generated transactions, following close and read,
     `output == join input`
 - .cabal file with tested lower bounds
+- Consider `unliftio` module to replace `safe-exceptions`
