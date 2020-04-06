@@ -89,6 +89,7 @@ data Connection a = Connection
     , streams        :: TVar [Stream a]
     , cEvSerialize   :: (a -> B.ByteString)
     , cEvDeserialize :: (B.ByteString -> a)
+    , closeLock      :: MVar ()
     , writeThread    :: ThreadId
     }
 
@@ -167,7 +168,9 @@ openConnection dir fS fD = do
     ns <- newTVarIO 0
     ss <- newTVarIO []
 
-    Connection st pthIdx pthLog wq ec ns ss fS fD
+    cl <- newEmptyMVar
+
+    Connection st pthIdx pthLog wq ec ns ss fS fD cl
         <$> (forkIO $ bracket_
                 (pure ())
                 (do
@@ -182,6 +185,7 @@ openConnection dir fS fD = do
                     streams' <- readTVarIO ss
                     traverse_ closeStream streams'
                     atomically $ writeTVar ss []
+                    putMVar cl ()
                 )
                 (forever
                     $   (atomically $ peekTQueue wq)
@@ -203,12 +207,13 @@ openConnection dir fS fD = do
         setFdOption fd SynchronousWrites True -- TODO: consider O_DSYNC as a data sync may be quicker - http://man7.org/linux/man-pages/man2/fdatasync.2.html
         pure fd
 
--- | Close a database connection. Writes all queued transactions, closes associated 'Stream's and frees all allocated resources.
+-- | Close a database connection. Writes all queued transactions, closes associated 'Stream's and frees all allocated resources. Blocks until done.
 closeConnection :: Connection a -> IO ()
 closeConnection conn = join . atomically $ assertConnState Open conn $ do
     -- design decision: casade behaviour from thread death rather than the state to avoid async exception mistakes
     atomically $ writeTVar (connState conn) Closed
     killThread $ writeThread conn
+    readMVar $ closeLock conn
 
 -- | Convenience function accepting a continuation for the connection. Opens and closes the connection, executing the continuation in an exception-safe context using 'bracket'.
 withConnection
