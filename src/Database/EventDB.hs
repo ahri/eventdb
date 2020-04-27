@@ -331,7 +331,7 @@ readEventFromFS fIdx fLog idx = do
     fmap (idx,) $ readFrom (unLogFile fLog) pLogFrom (fromIntegral $ pLogTo - pLogFrom)
 
 -- | Read a snapshot of the database at call time. Note that any events added while reading will not be iterated over.
-readSnapshot :: Connection a -> Word64 -> (IndexedEvent a -> IO ()) -> IO ()
+readSnapshot :: Connection a -> Word64 -> (Word64 -> IndexedEvent a -> IO ()) -> IO ()
 readSnapshot dbConn from f = do
     c <- atomically $ eventCount dbConn
     withStream from dbConn $ \stream -> readEvt stream from c
@@ -340,7 +340,7 @@ readSnapshot dbConn from f = do
     readEvt stream idx c = if idx == c
         then pure ()
         else do
-            readEvent stream >>= f
+            readEvent stream >>= f c
             readEvt stream (idx + 1) c
 
 {-| __WARNING: reads the whole DB, can be very expensive in terms of time and resources.__
